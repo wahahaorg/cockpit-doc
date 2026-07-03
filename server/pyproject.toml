@@ -1,0 +1,22 @@
+[project]
+name = "cashflow-cockpit-server"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.14",
+  "fastapi>=0.115",
+  "openpyxl>=3.1",
+  "psycopg[binary]>=3.2",
+  "pydantic-settings>=2.7",
+  "python-multipart>=0.0.20",
+  "sqlalchemy>=2.0",
+  "uvicorn[standard]>=0.34",
+]
+
+[dependency-groups]
+dev = ["httpx>=0.28", "pytest>=8.3", "pytest-cov>=6.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
