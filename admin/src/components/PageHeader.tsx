@@ -1,0 +1,2 @@
+import { Alert, Space, Tag } from 'antd';
+export default function PageHeader({title,subtitle,mock}:{title:string;subtitle:string;mock?:boolean}){return <><Space style={{width:'100%',justifyContent:'space-between'}}><div><h1 className="page-title">{title}</h1><p className="page-subtitle">{subtitle}</p></div>{mock&&<Tag color="orange">本地演示回退</Tag>}</Space>{mock&&<Alert style={{marginBottom:16}} type="warning" showIcon message="后端暂不可用，当前展示本地脱敏样本；操作类功能仍需后端服务。" />}</>}

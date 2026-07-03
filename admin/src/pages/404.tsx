@@ -1,0 +1,1 @@
+import { Button, Result } from 'antd'; import { history } from '@umijs/max'; export default ()=> <Result status="404" title="页面不存在" extra={<Button type="primary" onClick={()=>history.push('/workbench')}>返回工作台</Button>}/>;
