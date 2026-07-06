@@ -1,0 +1,82 @@
+name: Deploy Docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs-site/**'
+      - 'doc/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只允许一个部署，跳过排队中的任务，不取消正在运行的
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取全量历史，用于 lastUpdated
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: docs-site
+
+      - name: Sync doc/ into docs-site/docs/
+        run: |
+          # V3 文档
+          cp "doc/V3_交付索引.md"                                      docs-site/docs/v3/delivery-index.md
+          cp "doc/V3_数据库表结构与字段字典.md"                            docs-site/docs/v3/db-schema.md
+          cp "doc/V3_计算规则与CFO确认表.md"                              docs-site/docs/v3/calc-rules.md
+          cp "doc/V3_API设计.md"                                        docs-site/docs/v3/api-design.md
+          cp "doc/V3_MVP后端数据流图.md"                                  docs-site/docs/v3/data-flow.md
+          cp "doc/V3_MVP后端主要实现说明.md"                              docs-site/docs/v3/implementation.md
+          cp "doc/MVP后端待确认口径清单.md"                                docs-site/docs/v3/pending-qa.md
+          # 模块文档
+          cp "doc/30_60_90天现金流预测模块_MVP技术方案初稿.md"              docs-site/docs/modules/cashflow.md
+          cp "doc/回款风险Top3模块_MVP技术方案初稿.md"                      docs-site/docs/modules/receivable-risk.md
+          cp "doc/付款建议Top3模块_MVP技术方案初稿.md"                      docs-site/docs/modules/payment-recommendation.md
+          cp "doc/今日老板要拍板模块_MVP技术方案初稿.md"                     docs-site/docs/modules/boss-decision.md
+          # V1 文档
+          cp "doc/CEO现金流驾驶舱V1.0_MVP技术方案讨论稿.md"                 docs-site/docs/v1/tech-plan.md
+          cp "doc/项目V1.0落地执行方案.md"                                 docs-site/docs/v1/execution-plan.md
+          cp "doc/CEO现金流驾驶舱V1.0_产品边界说明.md"                      docs-site/docs/v1/product-boundary.md
+          cp "doc/CEO现金流驾驶舱V1.0_字段算法与数据来源清单.md"               docs-site/docs/v1/field-algo.md
+          cp "doc/CEO现金流驾驶舱V1.0_财务数据接入与标准模板对接说明.md"        docs-site/docs/v1/data-ingestion.md
+          cp "doc/CEO经营决策系统_团队Agent交接说明.md"                      docs-site/docs/v1/agent-handoff.md
+
+      - name: Build VitePress site
+        run: npm run build
+        working-directory: docs-site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/docs/.vitepress/dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

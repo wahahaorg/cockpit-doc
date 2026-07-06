@@ -1,0 +1,43 @@
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Umi
+node_modules/
+.pnpm-store/
+.umi/
+.umi-production/
+dist/
+coverage/
+*.tsbuildinfo
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
+
+# Local runtime data
+*.db
+*.sqlite
+*.sqlite3
+logs/
+tmp/
+
+# Generated previews / inspection files
+output/preview_*.png
+output/*.inspect.ndjson

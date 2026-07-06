@@ -1,0 +1,13 @@
+{
+  "name": "cockpit-docs",
+  "version": "1.0.0",
+  "description": "CEO 现金流驾驶舱 V3 技术文档站",
+  "scripts": {
+    "dev": "vitepress dev docs",
+    "build": "vitepress build docs",
+    "preview": "vitepress preview docs"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.3"
+  }
+}

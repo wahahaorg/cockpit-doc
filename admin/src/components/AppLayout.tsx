@@ -16,13 +16,18 @@ export default function AppLayout({ children }: PropsWithChildren) {
     () => history.location.pathname,
     () => '/',
   );
+  const selectedPath = pathname.startsWith('/imports')
+    ? '/imports'
+    : pathname.startsWith('/metrics')
+      ? '/metrics'
+      : pathname;
 
   return <Layout style={{ minHeight: '100vh' }}>
     <Layout.Sider width={232} theme="light" style={{ borderRight: '1px solid #e5ebef' }}>
       <div style={{ padding: '24px 22px 18px' }}>
         <Space align="start"><SafetyCertificateOutlined style={{ color: '#167d8d', fontSize: 28 }} /><div><Typography.Title level={4} style={{ margin: 0 }}>现金流验证台</Typography.Title><Typography.Text type="secondary">V3 · 财务审计工作台</Typography.Text></div></Space>
       </div>
-      <Menu mode="inline" selectedKeys={[pathname.startsWith('/imports') ? '/imports' : pathname]} items={items} onClick={({ key }) => history.push(key)} />
+      <Menu mode="inline" selectedKeys={[selectedPath]} items={items} onClick={({ key }) => history.push(key)} />
     </Layout.Sider>
     <Layout>
       <Layout.Header style={{ background: 'rgba(255,255,255,.92)', borderBottom: '1px solid #e5ebef', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 28px' }}>
