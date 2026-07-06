@@ -1,7 +1,8 @@
 import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-plugin-mermaid'
 
-export default defineConfig({
-  // GitHub Pages 部署在 /cockpit/ 子路径下，必须设置 base
+export default withMermaid(defineConfig({
+  // GitHub Pages 部署在 /cockpit-doc/ 子路径下，必须设置 base
   // 如果用自定义域名则改为 '/'
   base: '/cockpit-doc/',
 
@@ -90,4 +91,9 @@ export default defineConfig({
   markdown: {
     lineNumbers: true,
   },
-})
+
+  // Mermaid 配置
+  mermaid: {
+    theme: 'neutral',
+  },
+}))

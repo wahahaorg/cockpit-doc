@@ -8,7 +8,7 @@
 
 这张图描述 MVP 后端的主链路。系统的核心不是 AI 直接生成经营结论，而是先把财务数据标准化，再由规则引擎生成确定性结果，AI 只在用户点击解释时读取已沉淀的事实。
 
-~~~mermaid
+```mermaid
 flowchart LR
     A[财务 Excel<br/>账户余额/应收款/实际回款/计划支出] --> B[导入解析]
     B --> C[原始行留存<br/>raw_import_row]
@@ -36,13 +36,13 @@ flowchart LR
     K --> N
     L --> N
     M --> N
-~~~
+```
 
 ## 2. 导入与标准数据落表流
 
 导入模块会同时保存"原始行"和"标准业务表"。原始行用于追溯和审核，标准业务表用于后续规则计算。
 
-~~~mermaid
+```mermaid
 flowchart TB
     A[上传 Excel] --> B[文件类型检查<br/>仅 .xlsx]
     B --> C[模板版本检查<br/>当前 V0.1]
@@ -65,7 +65,7 @@ flowchart TB
     N --> O[生成 Task 催收任务<br/>逾期应收→task]
     N --> P[首次刷新决策事件<br/>refresh_decision_events]
     M -->|有阻断错误| Q[拒绝发布<br/>422 batch_has_blocking_errors]
-~~~
+```
 
 > **注意**：`Customer` 表不绑定批次，同一客户编号全局复用（`customer_code` 唯一）。
 > 导入过程中 warning 行也会写入标准业务表，只有 error 行被排除。
@@ -74,7 +74,7 @@ flowchart TB
 
 现金流预测只使用当前已发布批次。它先生成一条 90 天逐日曲线，再从同一条曲线切出 30、60、90 天窗口，避免不同模块公式不一致。
 
-~~~mermaid
+```mermaid
 flowchart LR
     A[当前已发布批次] --> B[读取账户余额]
     A --> C[读取应收款]
@@ -95,7 +95,7 @@ flowchart LR
     M --> O[60 天窗口摘要]
     M --> P[90 天窗口摘要]
     M --> Q[每日 expectedInflow/plannedOutflow/netFlow/predictedBalance]
-~~~
+```
 
 现金流每日核心公式：
 
@@ -109,7 +109,7 @@ flowchart LR
 
 回款风险模块追溯到应收款和实际回款。实际回款用于抵扣应收金额，剩余未回部分才参与风险判断。
 
-~~~mermaid
+```mermaid
 flowchart TB
     A[应收款] --> C[按应收编号聚合<br/>ReceivableFact]
     B[实际回款] --> C
@@ -127,7 +127,7 @@ flowchart TB
     M --> N[Top 3 返回给前端]
     M --> N2[全量返回<br/>GET /receivable-risks]
     I --> O[老板拍板事件候选<br/>refresh_decision_events]
-~~~
+```
 
 > **与文档 V0.1 的差异**：每条风险项会附带最新一条跟进记录（`lastFollowupDate`/`lastFollowupNote`）。
 
@@ -135,7 +135,7 @@ flowchart TB
 
 付款建议模块会复用现金流预测输入。它先按支出状态做资格判断，再按付款队列逐笔把支出放进现金流曲线中试算，结果持久化到 `payment_assessment` 表。
 
-~~~mermaid
+```mermaid
 flowchart TB
     A[计划支出] --> B{审批状态}
     B -->|planned/pending| C[not_ready<br/>未完成审批]
@@ -154,7 +154,7 @@ flowchart TB
     C --> M
     M --> N[付款建议 Top 3<br/>boss_review > defer > not_ready > pay]
     K --> O[老板拍板事件候选<br/>refresh_decision_events]
-~~~
+```
 
 > **与文档 V0.1 的差异**：
 > 1. 评估结果持久化到 `payment_assessment` 表，包含 `gap_before/gap_after/gap_increase/evidence_snapshot`。
@@ -167,7 +167,7 @@ flowchart TB
 
 老板拍板模块只接收已经达到升级条件的事件。当前 MVP 有两个来源：红色回款风险、付款建议中的 boss_review。
 
-~~~mermaid
+```mermaid
 flowchart LR
     A[回款风险计算] --> B{是否红色风险}
     B -->|是| C[回款风险拍板事件<br/>event_type=receivable_risk]
@@ -184,7 +184,7 @@ flowchart LR
     K -->|closed| N[风险源消失自动关闭<br/>closed_reason=source_risk_resolved]
     L --> O[老板提交处理选项<br/>POST /{id}:decide]
     O --> M
-~~~
+```
 
 > **触发时机**：
 > 1. **发布批次时**：`publish_batch()` → `_generate_tasks()` → `refresh_decision_events()` 同步触发一次全量刷新。
@@ -198,7 +198,7 @@ flowchart LR
 
 AI 解释分两条路径：①决策事件的 SSE 流式解释；②付款建议的同步解释（结果写回 DB 可缓存）。二者均不参与规则计算，也不改变事件状态。
 
-~~~mermaid
+```mermaid
 sequenceDiagram
     participant U as 前端用户
     participant API as 后端 AI 接口
@@ -227,7 +227,7 @@ sequenceDiagram
         API->>DB: 写回 ai_explanation 字段
         API-->>U: 返回解释文本（cached=false）
     end
-~~~
+```
 
 > AI 只解释传入事实：不重新计算金额，不补充不存在的数据，不替老板做最终决策。
 > 路径 B 的解释写回 `payment_assessment.ai_explanation`；若评估结果发生变化（`changed=True`），该字段会被清空，下次请求重新生成。
