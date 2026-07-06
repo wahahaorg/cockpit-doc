@@ -25,6 +25,7 @@ import type {
   CopilotChatResp,
   CashflowForecastResp,
   ReceivableRiskTopResp,
+  PaymentRecommendationExplanationResp,
   PaymentRecommendationTopResp,
   DecisionEvent,
 } from './types'
@@ -159,6 +160,9 @@ export const receivableRiskTop3 = (asOfDate: string) =>
 
 export const paymentRecommendationTop3 = (asOfDate: string) =>
   apiGet<PaymentRecommendationTopResp>('/api/v1/payment-recommendations/top3', { asOfDate })
+
+export const paymentRecommendationExplanation = (id: string) =>
+  apiPost<PaymentRecommendationExplanationResp>('/api/v1/payment-recommendations/' + id + '/ai-explanation')
 
 export const listDecisionEvents = (asOfDate: string, status = 'pending') =>
   apiGet<DecisionEvent[]>('/api/v1/decision-events', { asOfDate, status, page: 1, pageSize: 20 })

@@ -315,12 +315,20 @@ export interface PaymentRecommendation {
   gapDate: string | null
   recoveryDate: string | null
   evidence: Record<string, unknown>
+  aiExplanation: string | null
 }
 
 export interface PaymentRecommendationTopResp {
   asOfDate: string
   batchId: string
   items: PaymentRecommendation[]
+}
+
+export interface PaymentRecommendationExplanationResp {
+  id: string
+  aiExplanation: string
+  cached: boolean
+  item: PaymentRecommendation
 }
 
 export interface DecisionEvent {

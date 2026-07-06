@@ -5,6 +5,7 @@ import {
   ApiError,
   cashflowForecast,
   listDecisionEvents,
+  paymentRecommendationExplanation,
   paymentRecommendationTop3,
   receivableRiskTop3,
   streamDecisionExplanation,
@@ -303,9 +304,11 @@ function DecisionCard({ item }: { item: DecisionItem }) {
   const [explanation, setExplanation] = useState('')
   const [explaining, setExplaining] = useState(false)
   const [explainError, setExplainError] = useState<string | null>(null)
+  const [popoverOpen, setPopoverOpen] = useState(false)
 
   async function explain() {
-    setExplanation('')
+    setPopoverOpen(true)
+    if (explanation) return
     setExplainError(null)
     setExplaining(true)
     try {
@@ -340,14 +343,24 @@ function DecisionCard({ item }: { item: DecisionItem }) {
           {explaining ? 'AI 正在解释…' : 'AI 解释依据'}
         </button>
       </div>
-      {explanation ? (
-        <div className="reason-text" style={{ marginTop: 12, whiteSpace: 'pre-wrap' }}>
-          {explanation}
-        </div>
-      ) : null}
-      {explainError ? (
-        <div className="reason-text" style={{ marginTop: 12, color: 'var(--red)' }}>
-          {explainError}
+      {popoverOpen ? (
+        <div className="ai-popover" role="dialog" aria-label="AI 解释依据">
+          <div className="ai-popover-head">
+            <span>AI 解释依据</span>
+            <button type="button" onClick={() => setPopoverOpen(false)} aria-label="关闭 AI 解释">
+              ×
+            </button>
+          </div>
+          <div className="ai-popover-body">
+            {explanation ? (
+              <div style={{ whiteSpace: 'pre-wrap' }}>{explanation}</div>
+            ) : explaining ? (
+              <div>正在生成解释，请稍候…</div>
+            ) : null}
+            {explainError ? (
+              <div style={{ color: 'var(--red)' }}>{explainError}</div>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>
@@ -407,16 +420,84 @@ function PaymentList({ rows, unit }: { rows: PaymentRecommendation[]; unit: 'yua
   return (
     <div className="payment-list">
       {rows.map((item) => (
-        <div key={item.id} className="payment-item">
-          <div className="payment-item-head">
-            <span>{item.expenseName}</span>
-            <strong>{moneyU(item.plannedAmount, unit)}</strong>
-          </div>
-          <div className="payment-advice">{PAYMENT_LABEL[item.decision]}</div>
-          <div className="payment-reason">
-            {reasonText(item.reasonCodes, `${item.rigidity === 'rigid' ? '刚性' : '非刚性'}支出，计划 ${formatDate(item.plannedDate)} 支付`)}
-          </div>
-          <AIActions compact link="/approval" />
+        <PaymentCard key={item.id} item={item} unit={unit} />
+      ))}
+    </div>
+  )
+}
+
+function PaymentCard({ item, unit }: { item: PaymentRecommendation; unit: 'yuan' | 'wan' }) {
+  const [showEvidence, setShowEvidence] = useState(false)
+  const [explanation, setExplanation] = useState(item.aiExplanation || '')
+  const [explaining, setExplaining] = useState(false)
+  const [explainError, setExplainError] = useState<string | null>(null)
+
+  async function explain() {
+    if (explanation) return
+    setExplainError(null)
+    setExplaining(true)
+    try {
+      const resp = await paymentRecommendationExplanation(item.id)
+      setExplanation(resp.aiExplanation)
+    } catch (error) {
+      setExplainError(error instanceof ApiError ? error.message : 'AI 解释生成失败')
+    } finally {
+      setExplaining(false)
+    }
+  }
+
+  const fallbackReason = `${item.rigidity === 'rigid' ? '刚性' : '非刚性'}支出，计划 ${formatDate(item.plannedDate)} 支付`
+  return (
+    <div className="payment-item">
+      <div className="payment-item-head">
+        <span>{item.expenseName}</span>
+        <strong>{moneyU(item.plannedAmount, unit)}</strong>
+      </div>
+      <div className="payment-advice">{PAYMENT_LABEL[item.decision]}</div>
+      <div className="payment-reason">
+        {reasonText(item.reasonCodes, fallbackReason)}
+      </div>
+      <div className="ai-card-actions compact">
+        <button type="button" onClick={() => setShowEvidence((current) => !current)}>
+          {showEvidence ? '收起依据' : '查看依据'}
+        </button>
+        <button type="button" onClick={explain} disabled={explaining}>
+          {explanation ? '已生成 AI 依据' : explaining ? 'AI 正在解释…' : 'AI 解释依据'}
+        </button>
+      </div>
+      {showEvidence ? <PaymentEvidence item={item} unit={unit} /> : null}
+      {explanation ? (
+        <div className="reason-text" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>
+          {explanation}
+        </div>
+      ) : null}
+      {explainError ? (
+        <div className="reason-text" style={{ marginTop: 10, color: 'var(--red)' }}>
+          {explainError}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function PaymentEvidence({ item, unit }: { item: PaymentRecommendation; unit: 'yuan' | 'wan' }) {
+  const rows = [
+    ['支出编号', item.expenseNo],
+    ['计划日期', formatDate(item.plannedDate)],
+    ['审批状态', item.approvalStatus],
+    ['刚性程度', item.rigidity === 'rigid' ? '刚性' : '可延期'],
+    ['支付前最大缺口', item.gapBefore ? moneyU(item.gapBefore, unit) : '无试算'],
+    ['支付后最大缺口', item.gapAfter ? moneyU(item.gapAfter, unit) : '无试算'],
+    ['缺口增加', item.gapIncrease ? moneyU(item.gapIncrease, unit) : '无试算'],
+    ['缺口日期', item.gapDate ? formatDate(item.gapDate) : '无'],
+    ['恢复日期', item.recoveryDate ? formatDate(item.recoveryDate) : '无'],
+    ['规则依据', reasonText(item.reasonCodes, '未命中额外原因')],
+  ]
+  return (
+    <div className="reason-text" style={{ marginTop: 10 }}>
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          {label}：{value}
         </div>
       ))}
     </div>
