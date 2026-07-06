@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+
+# 本地环境（凭证不入库）
+.env
+.env.local
+.env.*.local
+
+# 编辑器 / 系统
+.DS_Store
+*.log
+.vite/
+
+# package-lock.json 必须提交（锁定版本），不在忽略列表
