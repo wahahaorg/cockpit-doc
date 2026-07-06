@@ -243,30 +243,194 @@ Top 3 候选只取红色和黄色风险。排序优先级为：
 
 ## 8. AI 解释模块
 
-### 8.1 模块职责
+### 8.1 模块职责与核心原则
 
-AI 模块只服务于“老板点击查看 AI 依据 / AI 解释原因”的交互。它读取已经沉淀的决策事件，把事件标题、类型、风险等级、金额、日期、负责人、原因码、证据快照和可选处理方式传给模型，由模型生成老板可读说明。
+AI 模块只做一件事：把系统已经算好的结论，翻译成老板能读懂的中文。
 
-### 8.2 接入方式
+**它不参与任何计算**。现金流缺口、回款风险等级、付款是否建议暂缓、是否进入老板拍板——全部由规则引擎提前算好并写入数据库。AI 只是在用户点击"AI 解释"时，把这些已有的数字和结论拼成一段通顺的说明。
 
-当前使用 LangChain 的 OpenAI-compatible Chat 模型封装，默认模型为 qwen-plus，默认兼容接口地址为阿里云 DashScope compatible-mode 地址。
+```
+规则引擎算数字  →  存入数据库  →  用户点击"AI 解释"  →  后端把数字传给 AI  →  AI 说人话  →  前端展示
+```
 
-相关开关包括：是否启用 AI、模型名称、DashScope API Key、Base URL、超时时间和最大重试次数。
+### 8.2 两条解释路径
 
-如果未启用 AI 或没有配置 Key，接口不会失败，而是返回确定性降级解释。
+当前系统有两条 AI 解释路径，接口和行为不同：
 
-### 8.3 输出方式
+| | 路径 A：拍板事件解释 | 路径 B：付款建议解释 |
+|---|---|---|
+| **触发方式** | 用户点击老板拍板事件的"查看 AI 依据" | 用户点击付款建议的"AI 解释" |
+| **接口** | `GET /decision-events/{id}/ai-explanation:stream` | `POST /payment-recommendations/{id}/ai-explanation` |
+| **输出方式** | SSE 流式（边生成边推送） | 同步返回 |
+| **是否缓存** | 不缓存，每次都实时生成 | 缓存：首次生成后写回数据库，再次请求直接返回 |
+| **缓存失效** | 不适用 | 评估结果发生变化时自动清空，下次重新生成 |
 
-AI 解释接口使用 SSE 流式输出。前端可以边接收边展示。
+### 8.3 传入 AI 的数据格式
 
-事件流包含两类消息：
+AI 收到的不是原始数据库记录，而是后端专门整理好的一个 JSON 事实包，只包含解释所需的字段。
 
-- delta：增量文本；
-- done：结束标记，并说明是否为降级输出。
+#### 路径 A — 拍板事件
 
-### 8.4 AI 边界
+**回款风险事件**传入内容示例：
 
-Prompt 明确要求模型只能解释传入的结构化事实，不重新计算金额，不编造缺失数据，不代替老板做最终决策，并用中文输出适合老板阅读的解释。
+```json
+{
+  "title": "某客户回款风险需拍板",
+  "eventType": "receivable_risk",
+  "riskLevel": "red",
+  "impactAmount": "1500000.00",
+  "impactDate": "2026-06-30",
+  "ownerName": "张三",
+  "reasonCodes": ["overdue_30_days", "overdue_large_amount"],
+  "evidence": {
+    "receivableNo": "REC-2026-0088",
+    "customerName": "某客户",
+    "receivableAmount": "2000000.00",
+    "collectedAmount": "500000.00",
+    "outstandingAmount": "1500000.00",
+    "agreedDueDate": "2026-05-31",
+    "overdueDays": 36
+  },
+  "allowedOptions": [
+    "escalate_collection",
+    "continue_followup",
+    "adjust_expected_date",
+    "reassign_owner"
+  ],
+  "ruleVersion": "v0.1"
+}
+```
+
+**付款 boss_review 事件**传入内容示例：
+
+```json
+{
+  "title": "服务器采购款付款需拍板",
+  "eventType": "payment_assessment",
+  "riskLevel": "red",
+  "impactAmount": "800000.00",
+  "impactDate": "2026-07-15",
+  "ownerName": "李四",
+  "reasonCodes": ["rigid_expense", "cash_gap_increased"],
+  "evidence": {
+    "expenseNo": "EXP-2026-042",
+    "expenseName": "服务器采购款",
+    "plannedDate": "2026-07-15",
+    "plannedAmount": "800000.00",
+    "rigidity": "rigid",
+    "approvalStatus": "approved",
+    "gapBefore": "200000.00",
+    "gapAfter": "1000000.00"
+  },
+  "allowedOptions": [
+    "pay_and_fund",
+    "defer_payment",
+    "adjust_other_expenses",
+    "prioritize_collection"
+  ],
+  "ruleVersion": "v0.1"
+}
+```
+
+#### 路径 B — 付款建议
+
+付款建议解释的数据结构与拍板事件略有不同，`allowedOptions` 直接是中文动作文本，并包含现金流影响的完整对比数据：
+
+```json
+{
+  "expenseNo": "EXP-2026-042",
+  "expenseName": "服务器采购款",
+  "amount": "800000.00",
+  "plannedDate": "2026-07-15",
+  "rigidity": "rigid",
+  "approvalStatus": "approved",
+  "decision": "boss_review",
+  "reasonCodes": ["rigid_expense", "cash_gap_increased"],
+  "gapBefore": "200000.00",
+  "gapAfter": "1000000.00",
+  "gapIncrease": "800000.00",
+  "gapDate": "2026-07-15",
+  "recoveryDate": null,
+  "allowedActions": [
+    "支付并补充资金",
+    "调整其他支出",
+    "优先催收回款",
+    "老板确认接受短期缺口"
+  ]
+}
+```
+
+### 8.4 Prompt 设计
+
+两条路径各有独立的 Prompt，核心约束相同：
+
+**系统提示词约束（两条路径共有）：**
+- 只能解释传入的结构化事实，不能重新计算或修改任何金额、日期、风险等级
+- 不得提出传入 `allowedOptions` 以外的处理方案
+- 不得代替老板做最终决策
+- 如果某项信息未提供，明确写"系统暂无该信息"，不要猜测
+
+**输出结构要求：**
+
+路径 A（拍板事件）：
+1. 一句话结论
+2. 为什么需要老板拍板
+3. 对现金流或回款的影响
+4. 当前可以选择的处理方式
+
+路径 B（付款建议）：
+1. 一句话结论
+2. 建议原因
+3. 对现金流的影响
+4. 可选动作
+
+### 8.5 降级机制
+
+当 AI 未启用（`ENABLE_AI=false`）、未配置 API Key 或调用失败时，系统不会返回错误，而是直接用模板拼出一段确定性文本返回。
+
+**路径 A 降级示例输出：**
+```
+一句话结论：该回款风险已达到老板介入条件。
+
+为什么需要老板拍板：规则引擎命中了 2 项升级条件，现有规则无法自动代替老板选择处理方案。
+
+影响：涉及金额 150.00 万元，影响日期为 2026-06-30。
+
+当前可以选择的处理方式：escalate_collection、continue_followup、adjust_expected_date、reassign_owner。
+```
+
+**路径 B 降级示例输出：**
+```
+一句话结论：服务器采购款当前需老板拍板。
+
+建议原因：该付款会扩大现金缺口，但属于刚性支出，系统不能自动替老板决定。
+
+对现金流的影响：支付前最大缺口 200000.00，支付后最大缺口 1000000.00，
+缺口增加 800000.00，缺口日期 2026-07-15。
+
+可选动作：支付并补充资金、调整其他支出、优先催收回款、老板确认接受短期缺口。
+```
+
+降级文本和 AI 文本通过响应中的 `degraded: true/false` 字段区分，前端可据此决定是否展示"AI 生成"标识。
+
+### 8.6 接入配置
+
+在 server 的 `.env` 文件中配置：
+
+```env
+ENABLE_AI=true
+AI_MODEL=qwen-plus
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxx
+AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_TIMEOUT=30
+AI_MAX_RETRIES=2
+```
+
+### 8.7 当前边界
+
+- 路径 A（拍板事件）的 AI 解释不持久化，每次请求均实时生成；如需审计留痕，后续可增加解释记录表。
+- 路径 B（付款建议）的 AI 解释写回 `payment_assessment.ai_explanation`，支持缓存；评估结果变化时自动失效。
+- 当前不对 AI 输出做二次校验（如金额是否与传入一致），依赖 Prompt 约束控制。
 
 ## 9. 首页概览与任务模块
 
