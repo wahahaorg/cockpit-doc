@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 from uuid import UUID
 
@@ -12,6 +13,8 @@ from app.database.session import get_db
 from app.modules.data_import.models import ImportBatch, RawImportRow
 from app.modules.data_import.service import create_import, publish_batch
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/imports", tags=["imports"])
 
 
@@ -24,6 +27,7 @@ async def upload_import(file: UploadFile = File(...), templateVersion: str = For
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise AppError("unsupported_file_type", "仅支持 .xlsx 文件", 415)
     content = await file.read(get_settings().max_upload_bytes + 1)
+    logger.info("received import file: name=%s size=%d", file.filename, len(content))
     if len(content) > get_settings().max_upload_bytes:
         raise AppError("file_too_large", "上传文件超过大小限制", 413)
     return {"data": batch_data(create_import(db, content, file.filename, templateVersion, dataPeriodStart, dataPeriodEnd))}

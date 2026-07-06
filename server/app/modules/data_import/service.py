@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -10,6 +11,8 @@ from app.core.exceptions import AppError
 from app.modules.cashflow.models import AccountBalance, Collection, Customer, PlannedExpense, Receivable, Task
 from app.modules.data_import.models import ImportBatch, RawImportRow
 from app.modules.data_import.parsers import ParsedRow, parse_workbook
+
+logger = logging.getLogger(__name__)
 
 
 def create_import(db: Session, content: bytes, file_name: str, template_version: str, period_start: date, period_end: date) -> ImportBatch:
@@ -51,6 +54,7 @@ def _persist_standard_rows(db: Session, batch_id: UUID, rows: list[ParsedRow]) -
     valid = [r for r in rows if r.status != "error"]
     for row in valid:
         d = row.normalized_data
+        logger.debug("normalized import row: sheet=%s row=%d data=%s", row.sheet_name, row.row_no, d)
         if row.sheet_name == "账户余额":
             db.add(AccountBalance(import_batch_id=batch_id, source_row_no=row.row_no, account_code=d["account_code"], account_name=d["account_name"], snapshot_date=d["snapshot_date"], available_balance=d["available_balance"], currency=d["currency"] or "CNY", restricted_amount=d["restricted_amount"] or Decimal("0"), remark=d["remark"]))
         elif row.sheet_name == "应收款":
@@ -90,7 +94,8 @@ def publish_batch(db: Session, batch_id: UUID, version: int, review_note: str | 
 
 def _generate_tasks(db: Session, batch: ImportBatch) -> None:
     from app.core.config import get_settings
-    from app.modules.dashboard.service import overview, risks
+    from app.modules.dashboard.service import risks
+    from app.modules.decision.service import refresh_decision_events
 
     as_of = date.today()
     db.execute(delete(Task).where(Task.import_batch_id == batch.id, Task.status == "pending"))
@@ -98,9 +103,8 @@ def _generate_tasks(db: Session, batch: ImportBatch) -> None:
         if item["overdueDays"] <= 0:
             continue
         db.add(Task(task_type="collection_overdue", source_type="receivable", source_id=UUID(item["receivableId"]), title=f"催收 {item['customerName']} · {item['outstandingAmount']} 元", risk_level=item["riskLevel"], owner_code=item["ownerCode"], owner_name=item["ownerName"], due_date=as_of, status="pending", boss_intervention_required=item["riskLevel"] == "red", rule_version=get_settings().rule_version, import_batch_id=batch.id))
-    summary = overview(db, as_of, batch.id)
-    if Decimal(summary["metrics"]["cashGap"]) > 0:
-        db.add(Task(task_type="cash_gap", source_type="batch", source_id=batch.id, title=f"筹措本月现金缺口 {summary['metrics']['cashGap']} 元", risk_level="red", owner_code="CFO", owner_name="财务负责人", due_date=as_of, status="pending", boss_intervention_required=True, rule_version=get_settings().rule_version, import_batch_id=batch.id))
+    # Cash gaps are evidence for receivable/payment decisions, not a third boss-event source.
+    refresh_decision_events(db, as_of, batch)
 
 
 def current_batch(db: Session, batch_id: UUID | None = None) -> ImportBatch:

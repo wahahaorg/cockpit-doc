@@ -45,3 +45,49 @@ def test_uniform_error_shape(client):
     response = client.get("/api/v1/cockpit/overview")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "published_batch_not_found"
+
+
+def test_deterministic_cockpit_modules(client):
+    response = client.post("/api/v1/imports", data={"templateVersion": "V0.1", "dataPeriodStart": "2026-05-01", "dataPeriodEnd": "2026-09-30"}, files={"file": ("modules.xlsx", workbook_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    batch = response.json()["data"]
+    published = client.post(f"/api/v1/imports/{batch['id']}:publish", json={"version": batch["version"]})
+    assert published.status_code == 200, published.text
+
+    forecast = client.get("/api/v1/cashflow-forecasts", params={"asOfDate": "2026-07-02"})
+    assert forecast.status_code == 200, forecast.text
+    assert len(forecast.json()["data"]["daily"]) == 90
+    assert {item["days"] for item in forecast.json()["data"]["windows"]} == {30, 60, 90}
+
+    risk_top3 = client.get("/api/v1/receivable-risks/top3", params={"asOfDate": "2026-07-02"})
+    assert risk_top3.status_code == 200
+    assert risk_top3.json()["data"]["redCount"] == 1
+    assert risk_top3.json()["data"]["items"][0]["reasonCodes"] == ["overdue_30_days", "overdue_large_amount"]
+
+    payments = client.get("/api/v1/payment-recommendations/top3", params={"asOfDate": "2026-07-02"})
+    assert payments.status_code == 200, payments.text
+    payment = payments.json()["data"]["items"][0]
+    assert payment["decision"] == "pay"
+    assert payment["aiExplanation"] is None
+    payment_explanation = client.post(f"/api/v1/payment-recommendations/{payment['id']}/ai-explanation")
+    assert payment_explanation.status_code == 200, payment_explanation.text
+    assert payment_explanation.json()["data"]["cached"] is False
+    assert "一句话结论" in payment_explanation.json()["data"]["aiExplanation"]
+    cached_explanation = client.post(f"/api/v1/payment-recommendations/{payment['id']}/ai-explanation")
+    assert cached_explanation.status_code == 200, cached_explanation.text
+    assert cached_explanation.json()["data"]["cached"] is True
+
+    events = client.get("/api/v1/decision-events", params={"asOfDate": "2026-07-02"})
+    assert events.status_code == 200, events.text
+    event = events.json()["data"][0]
+    assert event["eventType"] == "receivable_risk"
+    explanation = client.get(f"/api/v1/decision-events/{event['id']}/ai-explanation:stream")
+    assert explanation.status_code == 200
+    assert explanation.headers["content-type"].startswith("text/event-stream")
+    assert "一句话结论" in explanation.text
+    assert '"degraded": true' in explanation.text
+    decided = client.post(f"/api/v1/decision-events/{event['id']}:decide", json={"option": "escalate_collection", "note": "升级处理", "version": event["version"]})
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["data"]["status"] == "decided"
+    refreshed = client.get("/api/v1/decision-events", params={"asOfDate": "2026-07-02"})
+    assert refreshed.status_code == 200
+    assert refreshed.json()["pagination"]["total"] == 0

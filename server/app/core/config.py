@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 10 * 1024 * 1024
     rule_version: str = "cashflow-rules-v0.1"
     review_status: str = "pending_cfo_review"
+    ai_enabled: bool = True
+    ai_model: str = "qwen-plus"
+    dashscope_api_key: str | None = "sk-ff3473910a184ea8860e983562034c19"
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    ai_timeout_seconds: int = 30
+    ai_max_retries: int = 1
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

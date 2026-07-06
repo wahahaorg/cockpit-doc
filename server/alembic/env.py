@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.database.base import Base
 from app.modules.cashflow import models as cashflow_models  # noqa: F401
 from app.modules.data_import import models as import_models  # noqa: F401
+from app.modules.decision import models as decision_models  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
@@ -28,4 +29,3 @@ def run_migrations_online():
 
 
 run_migrations_offline() if context.is_offline_mode() else run_migrations_online()
-

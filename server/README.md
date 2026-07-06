@@ -21,6 +21,10 @@ uv run uvicorn app.main:app --reload --port 8000
 - 批次列表、详情、错误查看和整批发布
 - 账户余额、客户、应收、回款、计划支出预览
 - 驾驶舱指标、回款风险、今日任务、跟进和支出试算
+- LangChain 接入阿里云百炼 `qwen-plus`，按需流式解释老板拍板依据
 - 金额统一使用 `Decimal`；所有规则标记为待 CFO 确认
+
+AI 未配置时接口仍可使用，会返回基于结构化依据生成的固定模板。启用时在 `.env` 中设置
+`AI_ENABLED=true`、`DASHSCOPE_API_KEY` 和对应业务空间的 `DASHSCOPE_BASE_URL`。
 
 运行测试：`uv run pytest`。

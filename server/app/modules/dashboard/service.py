@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.modules.cashflow.calculators import ReceivableFact, cash_gap, month_bounds
-from app.modules.cashflow.models import AccountBalance, Collection, Customer, PlannedExpense, Receivable, Task
+from app.modules.cashflow.models import AccountBalance, Collection, Customer, FollowupRecord, PlannedExpense, Receivable, Task
 from app.modules.data_import.service import current_batch
 
 
@@ -47,14 +47,39 @@ def overview(db: Session, as_of: date, batch_id: UUID | None = None) -> dict:
 
 def risks(db: Session, as_of: date, risk_level: str | None = None, owner_code: str | None = None) -> list[dict]:
     batch = current_batch(db)
+    facts = receivable_facts(db, batch.id)
+    receivable_ids = [rec.id for rec, _, _ in facts]
+    followups = db.scalars(
+        select(FollowupRecord)
+        .where(FollowupRecord.receivable_id.in_(receivable_ids))
+        .order_by(FollowupRecord.followed_at.desc())
+    ).all() if receivable_ids else []
+    latest_followup = {}
+    for followup in followups:
+        latest_followup.setdefault(followup.receivable_id, followup)
     items = []
-    for rec, customer, fact in receivable_facts(db, batch.id):
+    for rec, customer, fact in facts:
         level = fact.risk_level(as_of)
         if risk_level and level != risk_level or owner_code and rec.owner_code != owner_code:
             continue
-        items.append({"receivableId": str(rec.id), "receivableNo": rec.receivable_no, "customerCode": customer.customer_code, "customerName": customer.customer_name, "receivableAmount": _money(Decimal(rec.receivable_amount)), "collectedAmount": _money(fact.collected), "outstandingAmount": _money(fact.outstanding), "agreedDueDate": rec.agreed_due_date.isoformat(), "overdueDays": fact.overdue_days(as_of), "riskLevel": level, "ownerCode": rec.owner_code, "ownerName": rec.owner_name})
+        followup = latest_followup.get(rec.id)
+        days_to_due = (rec.agreed_due_date - as_of).days
+        if days_to_due < 0:
+            due_status, due_text = "overdue", f"逾期 {abs(days_to_due)} 天"
+        elif days_to_due == 0:
+            due_status, due_text = "due_today", "今日到期"
+        elif days_to_due <= 2:
+            due_status, due_text = "due_soon", "明日到期" if days_to_due == 1 else "还有 2 天到期"
+        else:
+            due_status, due_text = "normal", f"距到期 {days_to_due} 天"
+        reasons = []
+        if fact.overdue_days(as_of) >= 30: reasons.append("overdue_30_days")
+        if fact.overdue_days(as_of) > 0 and fact.outstanding >= Decimal("1000000"): reasons.append("overdue_large_amount")
+        if level == "yellow" and fact.overdue_days(as_of) > 0: reasons.append("overdue_under_30_days")
+        if level == "yellow" and 0 <= days_to_due <= 2: reasons.append("due_within_2_days")
+        items.append({"receivableId": str(rec.id), "receivableNo": rec.receivable_no, "customerCode": customer.customer_code, "customerName": customer.customer_name, "receivableAmount": _money(Decimal(rec.receivable_amount)), "collectedAmount": _money(fact.collected), "outstandingAmount": _money(fact.outstanding), "agreedDueDate": rec.agreed_due_date.isoformat(), "overdueDays": fact.overdue_days(as_of), "daysToDue": days_to_due, "dueStatus": due_status, "dueText": due_text, "riskLevel": level, "reasonCodes": reasons, "ownerCode": rec.owner_code, "ownerName": rec.owner_name, "lastFollowupDate": followup.followed_at.date().isoformat() if followup else None, "lastFollowupNote": followup.content if followup else None})
     order = {"red": 0, "yellow": 1, "green": 2}
-    return sorted(items, key=lambda x: (order[x["riskLevel"]], -x["overdueDays"], -Decimal(x["outstandingAmount"])))
+    return sorted(items, key=lambda x: (order[x["riskLevel"]], x["daysToDue"], -x["overdueDays"], -Decimal(x["outstandingAmount"]), x["receivableNo"]))
 
 
 def simulate_expense(db: Session, as_of: date, amount: Decimal) -> dict:
@@ -64,4 +89,3 @@ def simulate_expense(db: Session, as_of: date, amount: Decimal) -> dict:
     projected = available - amount
     gap_after = gap_before + amount
     return {"asOfDate": as_of.isoformat(), "amount": _money(amount), "cashBefore": _money(available), "cashAfter": _money(projected), "cashGapBefore": _money(gap_before), "cashGapAfter": _money(gap_after), "riskLevel": "red" if gap_after > 0 else "green", "ruleVersion": get_settings().rule_version, "warnings": ["试算结果待 CFO 确认，不构成付款指令"]}
-
