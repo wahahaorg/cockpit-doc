@@ -299,14 +299,25 @@ function SectionHead({ title, tag }: { title: string; tag: string }) {
   )
 }
 
+const DEMO_MEMBERS = [
+  { id: 'u1', name: '张伟', role: '财务总监' },
+  { id: 'u2', name: '李娜', role: '运营负责人' },
+  { id: 'u3', name: '王芳', role: '销售总监' },
+  { id: 'u4', name: '陈强', role: '法务负责人' },
+  { id: 'u5', name: '刘洋', role: '风控专员' },
+]
+
 function DecisionCard({ item }: { item: DecisionItem }) {
   const tone = TONE[item.tone]
   const [explanation, setExplanation] = useState('')
   const [explaining, setExplaining] = useState(false)
   const [explainError, setExplainError] = useState<string | null>(null)
   const [popoverOpen, setPopoverOpen] = useState(false)
+  const [assignOpen, setAssignOpen] = useState(false)
+  const [assignedTo, setAssignedTo] = useState<{ id: string; name: string; role: string } | null>(null)
 
   async function explain() {
+    setAssignOpen(false)
     setPopoverOpen(true)
     if (explanation) return
     setExplainError(null)
@@ -324,6 +335,16 @@ function DecisionCard({ item }: { item: DecisionItem }) {
     }
   }
 
+  function openAssign() {
+    setPopoverOpen(false)
+    setAssignOpen(true)
+  }
+
+  function handleAssign(member: typeof DEMO_MEMBERS[0]) {
+    setAssignedTo(member)
+    setAssignOpen(false)
+  }
+
   return (
     <div className="decision-card" style={{ borderColor: tone.border }}>
       <div className="decision-topline">
@@ -334,7 +355,15 @@ function DecisionCard({ item }: { item: DecisionItem }) {
       <div className="decision-facts">
         <div><span>影响</span><strong>{item.impact}</strong></div>
         <div><span>原因</span><strong>{item.reason}</strong></div>
-        <div><span>责任人</span><strong>{item.owner}</strong></div>
+        <div>
+          <span>责任人</span>
+          <strong style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {assignedTo ? assignedTo.name : item.owner}
+            {assignedTo && (
+              <span className="assign-badge">已指派</span>
+            )}
+          </strong>
+        </div>
         <div><span>建议</span><strong>{item.suggestion}</strong></div>
       </div>
       <div className="ai-card-actions">
@@ -342,7 +371,12 @@ function DecisionCard({ item }: { item: DecisionItem }) {
         <button type="button" onClick={explain} disabled={explaining}>
           {explaining ? 'AI 正在解释…' : 'AI 解释依据'}
         </button>
+        <button type="button" onClick={openAssign} className={assignedTo ? 'assigned' : ''}>
+          {assignedTo ? `已指派 · ${assignedTo.name}` : '指派任务'}
+        </button>
       </div>
+
+      {/* AI 解释浮层 */}
       {popoverOpen ? (
         <div className="ai-popover" role="dialog" aria-label="AI 解释依据">
           <div className="ai-popover-head">
@@ -360,6 +394,35 @@ function DecisionCard({ item }: { item: DecisionItem }) {
             {explainError ? (
               <div style={{ color: 'var(--red)' }}>{explainError}</div>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {/* 指派任务浮层 */}
+      {assignOpen ? (
+        <div className="assign-popover" role="dialog" aria-label="指派任务">
+          <div className="ai-popover-head">
+            <span>指派任务给…</span>
+            <button type="button" onClick={() => setAssignOpen(false)} aria-label="关闭指派">
+              ×
+            </button>
+          </div>
+          <div className="assign-member-list">
+            {DEMO_MEMBERS.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                className={`assign-member-item${assignedTo?.id === m.id ? ' active' : ''}`}
+                onClick={() => handleAssign(m)}
+              >
+                <span className="assign-avatar">{m.name[0]}</span>
+                <span className="assign-info">
+                  <span className="assign-name">{m.name}</span>
+                  <span className="assign-role">{m.role}</span>
+                </span>
+                {assignedTo?.id === m.id && <span className="assign-check">✓</span>}
+              </button>
+            ))}
           </div>
         </div>
       ) : null}
