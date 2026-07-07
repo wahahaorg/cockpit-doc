@@ -8,8 +8,6 @@ WORKDIR /app
 
 # 先复制依赖文件
 COPY package.json pnpm-lock.yaml ./
-# admin 用了 pnpm workspace，workspace 配置也需要复制
-COPY pnpm-workspace.yaml ./
 
 RUN pnpm install --frozen-lockfile
 
