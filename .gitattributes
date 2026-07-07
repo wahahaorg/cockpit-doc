@@ -1,0 +1,12 @@
+# 默认所有文件统一用 LF，防止 Windows 换行符问题导致容器内 shell 报错
+* text=auto eol=lf
+
+# 二进制文件不转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary

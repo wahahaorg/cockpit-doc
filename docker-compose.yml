@@ -1,0 +1,75 @@
+services:
+
+  # ── 数据库 ────────────────────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kb_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kb_password}
+      POSTGRES_DB: ${POSTGRES_DB:-cockpit}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kb_user} -d ${POSTGRES_DB:-cockpit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── 后端 API ──────────────────────────────────────────────────────────────
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-kb_user}:${POSTGRES_PASSWORD:-kb_password}@postgres:5432/${POSTGRES_DB:-cockpit}
+      APP_ENV: ${APP_ENV:-production}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      AI_MODEL: ${AI_MODEL:-qwen3:8b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://192.168.2.136:11434/v1}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-ollama}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-60}
+      AI_MAX_RETRIES: ${AI_MAX_RETRIES:-1}
+    # 如果 Ollama 跑在宿主机本身（而非远程 IP），
+    # 把 .env 里 OLLAMA_BASE_URL 改为 http://host-gateway:11434/v1
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── CEO 驾驶舱前端（main-project） ────────────────────────────────────────
+  main-project:
+    build:
+      context: ./main-project
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      server:
+        condition: service_healthy
+
+  # ── 数据验证工作台（admin） ───────────────────────────────────────────────
+  admin:
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
