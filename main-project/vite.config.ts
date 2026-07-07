@@ -8,6 +8,7 @@ const API_TARGET = process.env.VITE_API_TARGET || 'http://127.0.0.1:8000'
 export default defineConfig(({ command }) => ({
   plugins: [react()],
   server: {
+    host: true,
     port: 5173,
     proxy: {
       '/api': {
