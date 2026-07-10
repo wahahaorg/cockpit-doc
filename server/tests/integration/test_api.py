@@ -1,7 +1,9 @@
 from datetime import date
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -11,7 +13,11 @@ from app.database.session import get_db
 from app.main import app
 from app.modules.cashflow import models as cashflow_models  # noqa
 from app.modules.data_import import models as import_models  # noqa
+from app.modules.income_reconciliation.service import _extract_settlement_text, _heuristic_settlement_extract, _norm_name
 from tests.unit.test_parser import workbook_bytes
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
@@ -91,3 +97,59 @@ def test_deterministic_cockpit_modules(client):
     refreshed = client.get("/api/v1/decision-events", params={"asOfDate": "2026-07-02"})
     assert refreshed.status_code == 200
     assert refreshed.json()["pagination"]["total"] == 0
+
+
+def test_income_reconciliation_demo_flow(client, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.modules.income_reconciliation.service.JOB_ROOT", tmp_path)
+    data_dir = PROJECT_ROOT / "test-data"
+    with (
+        (data_dir / "测试数据26.4-5月开票明细.xlsx").open("rb") as invoice,
+        (data_dir / "测试数据2026年4月-5月服务收支明细.xlsx").open("rb") as cashflow,
+        (data_dir / "5.15-正邦测试数据-10614.54.xlsx").open("rb") as settlement,
+    ):
+        response = client.post(
+            "/api/v1/income-reconciliation/jobs",
+            data={"period_start": "2026-04", "period_end": "2026-05"},
+            files=[
+                ("invoice_file", ("invoice.xlsx", invoice, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+                ("cashflow_file", ("cashflow.xlsx", cashflow, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+                ("settlement_files", ("settlement.xlsx", settlement, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            ],
+        )
+    assert response.status_code == 201, response.text
+    job = response.json()["data"]
+    assert job["status"] == "uploaded"
+
+    parsed = client.post(f"/api/v1/income-reconciliation/jobs/{job['jobId']}/parse")
+    assert parsed.status_code == 200, parsed.text
+    parsed_data = parsed.json()["data"]
+    assert parsed_data["status"] == "parsed"
+    assert len(parsed_data["files"]) == 3
+
+    generated = client.post(f"/api/v1/income-reconciliation/jobs/{job['jobId']}/generate")
+    assert generated.status_code == 200, generated.text
+    generated_data = generated.json()["data"]
+    assert generated_data["status"] == "generated"
+    assert generated_data["summary"]["confirmedRevenue"] > 0
+    assert generated_data["downloadUrl"].endswith("/download")
+
+    download = client.get(f"/api/v1/income-reconciliation/jobs/{job['jobId']}/download")
+    assert download.status_code == 200, download.text
+    output = tmp_path / "download.xlsx"
+    output.write_bytes(download.content)
+    workbook = load_workbook(output, read_only=True)
+    assert {"老板卡片", "收入链路核对表", "异常项清单", "解析文件列表"}.issubset(workbook.sheetnames)
+
+
+def test_settlement_pdf_uses_ocr_when_text_layer_is_incomplete():
+    pdf_path = PROJECT_ROOT / "test-data" / "紫金陈小说公司5月结算单（5.13）.pdf"
+
+    text, status, reason = _extract_settlement_text(pdf_path)
+    result = _heuristic_settlement_extract(text, pdf_path.name)
+
+    assert status == "success", reason
+    assert "服务内容" in text
+    assert "32038.95" in text
+    assert result["records"][0]["customerName"] == "紫金陈小说公司"
+    assert result["records"][0]["settlementAmount"] == 32038.95
+    assert _norm_name("紫金陈小说有限公司") == _norm_name("紫金陈小说公司")
