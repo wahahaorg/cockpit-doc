@@ -125,6 +125,11 @@ def test_income_reconciliation_demo_flow(client, tmp_path, monkeypatch):
     parsed_data = parsed.json()["data"]
     assert parsed_data["status"] == "parsed"
     assert len(parsed_data["files"]) == 3
+    events = client.get(f"/api/v1/income-reconciliation/jobs/{job['jobId']}/events.json")
+    assert events.status_code == 200, events.text
+    event_types = [event["type"] for event in events.json()["data"]["events"]]
+    assert "job_started" in event_types
+    assert "job_done" in event_types
 
     generated = client.post(f"/api/v1/income-reconciliation/jobs/{job['jobId']}/generate")
     assert generated.status_code == 200, generated.text

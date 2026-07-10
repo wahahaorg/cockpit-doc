@@ -1,3 +1,5 @@
+from threading import Thread
+
 from fastapi import APIRouter, Request, UploadFile
 from fastapi.responses import FileResponse
 
@@ -25,7 +27,11 @@ async def create_income_reconciliation_job(
 
 
 @router.post("/jobs/{job_id}/parse")
-def parse_income_reconciliation_job(job_id: str):
+def parse_income_reconciliation_job(job_id: str, background: bool = False):
+    if background:
+        service.prepare_parse_job(job_id)
+        Thread(target=service.parse_job, args=(job_id,), daemon=True).start()
+        return {"data": service.get_job(job_id)}
     return {"data": service.parse_job(job_id)}
 
 
@@ -37,6 +43,11 @@ def generate_income_reconciliation_job(job_id: str):
 @router.get("/jobs/{job_id}")
 def get_income_reconciliation_job(job_id: str):
     return {"data": service.get_job(job_id)}
+
+
+@router.get("/jobs/{job_id}/events.json")
+def get_income_reconciliation_events(job_id: str):
+    return {"data": {"job": service.get_job(job_id), "events": service.get_progress_events(job_id)}}
 
 
 @router.get("/jobs/{job_id}/files/{file_id}")

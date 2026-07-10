@@ -70,6 +70,8 @@ def create_job(
     }
     _write_json(job_dir / "job.json", metadata)
     _write_json(job_dir / "parsed" / "files.json", [])
+    _reset_progress_events(job_dir)
+    _append_progress_event(job_dir, "job_created", "收入核对任务已创建", progress=0)
     return get_job(job_id)
 
 
@@ -77,6 +79,9 @@ def parse_job(job_id: str) -> dict[str, Any]:
     started_at = time.monotonic()
     job_dir = _require_job(job_id)
     metadata = _read_json(job_dir / "job.json")
+    should_reset_events = metadata.get("status") != "parsing"
+    if should_reset_events:
+        _reset_progress_events(job_dir)
     logger.info(
         "income_reconciliation_parse_started job_id=%s invoice_file=%s cashflow_file=%s settlement_count=%d",
         job_id,
@@ -86,8 +91,12 @@ def parse_job(job_id: str) -> dict[str, Any]:
     )
     metadata["status"] = "parsing"
     _write_json(job_dir / "job.json", metadata)
+    _append_progress_event(job_dir, "job_started", "开始解析收入核对任务", progress=5)
 
-    files: list[dict[str, Any]] = []
+    files = _read_json(job_dir / "parsed" / "files.json", []) if not should_reset_events else _initial_file_statuses(metadata)
+    if not files:
+        files = _initial_file_statuses(metadata)
+    _write_json(job_dir / "parsed" / "files.json", files)
     invoice_rows: list[dict[str, Any]] = []
     cashflow_rows: list[dict[str, Any]] = []
     settlement_rows: list[dict[str, Any]] = []
@@ -95,6 +104,9 @@ def parse_job(job_id: str) -> dict[str, Any]:
     invoice_path = job_dir / "uploads" / metadata["invoiceFile"]
     cashflow_path = job_dir / "uploads" / metadata["cashflowFile"]
     try:
+        _replace_file_status(files, _file_status("file_invoice", invoice_path.name, "invoice_excel", "parsing", 0, 0, 0, None))
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_started", "正在读取开票明细 Excel", file_id="file_invoice", file_name=invoice_path.name, stage="excel_parse", progress=12)
         invoice_started_at = time.monotonic()
         invoice_rows = _parse_invoice_excel(invoice_path)
         logger.info(
@@ -104,12 +116,20 @@ def parse_job(job_id: str) -> dict[str, Any]:
             len(invoice_rows),
             int((time.monotonic() - invoice_started_at) * 1000),
         )
-        files.append(_file_status("file_invoice", invoice_path.name, "invoice_excel", "success", len(invoice_rows), sum(1 for row in invoice_rows if row["isEffective"]), 1, None))
+        invoice_status = _file_status("file_invoice", invoice_path.name, "invoice_excel", "success", len(invoice_rows), sum(1 for row in invoice_rows if row["isEffective"]), 1, None)
+        _replace_file_status(files, invoice_status)
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_done", "开票明细 Excel 读取完成", file_id="file_invoice", file_name=invoice_path.name, stage="excel_parse", parsed_rows=len(invoice_rows), valid_rows=invoice_status["validRows"], progress=25)
     except Exception as exc:
         logger.exception("income_reconciliation_invoice_failed job_id=%s file=%s", job_id, invoice_path.name)
-        files.append(_file_status("file_invoice", invoice_path.name, "invoice_excel", "failed", 0, 0, 0, str(exc)))
+        _replace_file_status(files, _file_status("file_invoice", invoice_path.name, "invoice_excel", "failed", 0, 0, 0, str(exc)))
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_failed", "开票明细 Excel 读取失败", file_id="file_invoice", file_name=invoice_path.name, stage="excel_parse", reason=str(exc), progress=25)
 
     try:
+        _replace_file_status(files, _file_status("file_cashflow", cashflow_path.name, "cashflow_excel", "parsing", 0, 0, 0, None))
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_started", "正在读取服务收支明细 Excel", file_id="file_cashflow", file_name=cashflow_path.name, stage="excel_parse", progress=30)
         cashflow_started_at = time.monotonic()
         cashflow_rows = _parse_cashflow_excel(cashflow_path)
         logger.info(
@@ -119,17 +139,29 @@ def parse_job(job_id: str) -> dict[str, Any]:
             len(cashflow_rows),
             int((time.monotonic() - cashflow_started_at) * 1000),
         )
-        files.append(_file_status("file_cashflow", cashflow_path.name, "cashflow_excel", "success", len(cashflow_rows), len(cashflow_rows), 1, None))
+        cashflow_status = _file_status("file_cashflow", cashflow_path.name, "cashflow_excel", "success", len(cashflow_rows), len(cashflow_rows), 1, None)
+        _replace_file_status(files, cashflow_status)
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_done", "服务收支明细 Excel 读取完成", file_id="file_cashflow", file_name=cashflow_path.name, stage="excel_parse", parsed_rows=len(cashflow_rows), valid_rows=cashflow_status["validRows"], progress=40)
     except Exception as exc:
         logger.exception("income_reconciliation_cashflow_failed job_id=%s file=%s", job_id, cashflow_path.name)
-        files.append(_file_status("file_cashflow", cashflow_path.name, "cashflow_excel", "failed", 0, 0, 0, str(exc)))
+        _replace_file_status(files, _file_status("file_cashflow", cashflow_path.name, "cashflow_excel", "failed", 0, 0, 0, str(exc)))
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_failed", "服务收支明细 Excel 读取失败", file_id="file_cashflow", file_name=cashflow_path.name, stage="excel_parse", reason=str(exc), progress=40)
 
+    settlement_count = len(metadata.get("settlementFiles", []))
     for index, name in enumerate(metadata.get("settlementFiles", []), start=1):
         file_id = f"file_settlement_{index:03d}"
         path = job_dir / "uploads" / "settlements" / name
-        parsed, status = _parse_settlement(path, file_id, job_dir)
+        progress_base = 45 + int((index - 1) / max(settlement_count, 1) * 40)
+        _replace_file_status(files, _file_status(file_id, path.name, _settlement_type(path), "parsing", 0, 0, 0, None))
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_started", "正在解析结算单文件", file_id=file_id, file_name=path.name, stage="settlement_parse", progress=progress_base)
+        parsed, status = _parse_settlement(path, file_id, job_dir, progress_base=progress_base)
         settlement_rows.extend(parsed)
-        files.append(status)
+        _replace_file_status(files, status)
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "file_done" if status["parseStatus"] in {"success", "warning"} else "file_failed", "结算单文件解析完成" if status["parseStatus"] in {"success", "warning"} else "结算单文件解析失败", file_id=file_id, file_name=path.name, stage="settlement_parse", parsed_rows=status["parsedRows"], valid_rows=status["validRows"], confidence=status["confidence"], reason=status.get("errorReason"), progress=min(progress_base + 12, 88))
 
     _write_json(job_dir / "parsed" / "files.json", files)
     _write_json(job_dir / "parsed" / "invoices.json", invoice_rows)
@@ -138,6 +170,7 @@ def parse_job(job_id: str) -> dict[str, Any]:
 
     metadata["status"] = "parse_failed" if any(file["parseStatus"] == "failed" for file in files[:2]) else "parsed"
     _write_json(job_dir / "job.json", metadata)
+    _append_progress_event(job_dir, "job_done", "收入核对解析完成" if metadata["status"] == "parsed" else "收入核对解析失败，请查看文件原因", status=metadata["status"], progress=100)
     logger.info(
         "income_reconciliation_parse_finished job_id=%s status=%s invoice_rows=%d cashflow_rows=%d settlement_rows=%d elapsed_ms=%d",
         job_id,
@@ -147,6 +180,17 @@ def parse_job(job_id: str) -> dict[str, Any]:
         len(settlement_rows),
         int((time.monotonic() - started_at) * 1000),
     )
+    return get_job(job_id)
+
+
+def prepare_parse_job(job_id: str) -> dict[str, Any]:
+    job_dir = _require_job(job_id)
+    metadata = _read_json(job_dir / "job.json")
+    metadata["status"] = "parsing"
+    _write_json(job_dir / "job.json", metadata)
+    _reset_progress_events(job_dir)
+    _write_json(job_dir / "parsed" / "files.json", _initial_file_statuses(metadata))
+    _append_progress_event(job_dir, "job_queued", "解析任务已进入后台队列", progress=1)
     return get_job(job_id)
 
 
@@ -176,6 +220,22 @@ def get_job(job_id: str) -> dict[str, Any]:
     metadata = _read_json(job_dir / "job.json")
     metadata["files"] = _read_json(job_dir / "parsed" / "files.json", [])
     return metadata
+
+
+def get_progress_events(job_id: str) -> list[dict[str, Any]]:
+    job_dir = _require_job(job_id)
+    path = job_dir / "progress.jsonl"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            logger.warning("income_reconciliation_progress_event_invalid job_id=%s line=%s", job_id, line[:200])
+    return events
 
 
 def get_file_result(job_id: str, file_id: str) -> dict[str, Any]:
@@ -263,7 +323,7 @@ def _parse_cashflow_excel(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _parse_settlement(path: Path, file_id: str, job_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _parse_settlement(path: Path, file_id: str, job_dir: Path, progress_base: int = 50) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     started_at = time.monotonic()
     file_type = _settlement_type(path)
     logger.info(
@@ -272,6 +332,7 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path) -> tuple[list[dic
         path.name,
         file_type,
     )
+    _append_progress_event(job_dir, "stage_started", "正在提取结算单文本", file_id=file_id, file_name=path.name, stage="text_extract", progress=progress_base + 2)
     text, text_status, text_reason = _extract_settlement_text(path)
     text_rel = f"extracted/texts/{file_id}.txt"
     _write_text(job_dir / text_rel, text)
@@ -292,11 +353,15 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path) -> tuple[list[dic
         )
         status = _file_status(file_id, path.name, file_type, text_status, 0, 0, 0, text_reason)
         status["textPath"] = text_rel
+        _append_progress_event(job_dir, "stage_failed", "结算单文本提取失败", file_id=file_id, file_name=path.name, stage="text_extract", reason=text_reason, progress=progress_base + 6)
         return [], status
 
+    _append_progress_event(job_dir, "stage_done", "结算单文本提取完成", file_id=file_id, file_name=path.name, stage="text_extract", text_chars=len(text), progress=progress_base + 6)
+    _append_progress_event(job_dir, "ai_started", "AI 正在抽取客户、周期、结算金额", file_id=file_id, file_name=path.name, stage="ai_extract", progress=progress_base + 8)
     ai_result = _extract_settlement_with_ai(text, path.name)
     ai_rel = f"extracted/ai_extracts/{file_id}.json"
     _write_json(job_dir / ai_rel, ai_result)
+    _append_progress_event(job_dir, "ai_done", "AI 抽取完成，正在标准化字段", file_id=file_id, file_name=path.name, stage="ai_extract", model=ai_result.get("model"), progress=progress_base + 10)
     records = []
     for record in ai_result.get("records", []):
         confidence = float(record.get("confidence") or 0)
@@ -332,6 +397,7 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path) -> tuple[list[dic
     status = _file_status(file_id, path.name, file_type, parse_status, len(records), sum(r["parseStatus"] == "success" for r in records), max(r["confidence"] for r in records), None if parse_status == "success" else "存在低置信度或缺失字段")
     status["textPath"] = text_rel
     status["aiExtractPath"] = ai_rel
+    _append_progress_event(job_dir, "stage_done", "结算单字段标准化完成", file_id=file_id, file_name=path.name, stage="standardize", parsed_rows=len(records), valid_rows=status["validRows"], confidence=status["confidence"], reason=status.get("errorReason"), progress=progress_base + 11)
     logger.info(
         "income_reconciliation_settlement_parse_finished file_id=%s file=%s status=%s model=%s records=%d elapsed_ms=%d",
         file_id,
@@ -826,13 +892,22 @@ def _safe_name(name: str) -> str:
 
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _read_json(path: Path, default: Any = None) -> Any:
     if not path or not path.exists() or not path.is_file():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        content = path.read_text(encoding="utf-8")
+        if not content.strip():
+            return default
+        return json.loads(content)
+    except json.JSONDecodeError:
+        logger.warning("income_reconciliation_json_read_failed path=%s", path)
+        return default
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -844,6 +919,62 @@ def _read_text(path: Path) -> str:
     if not path or not path.exists() or not path.is_file():
         return ""
     return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _reset_progress_events(job_dir: Path) -> None:
+    path = job_dir / "progress.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
+def _append_progress_event(job_dir: Path, event_type: str, message: str, **payload: Any) -> dict[str, Any]:
+    path = job_dir / "progress.jsonl"
+    event = {
+        "seq": len(get_progress_events_for_dir(job_dir)) + 1,
+        "type": event_type,
+        "message": message,
+        "createdAt": datetime.now().isoformat(),
+        **payload,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(event, ensure_ascii=False) + "\n")
+    return event
+
+
+def get_progress_events_for_dir(job_dir: Path) -> list[dict[str, Any]]:
+    path = job_dir / "progress.jsonl"
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            logger.warning("income_reconciliation_progress_event_invalid path=%s line=%s", path, line[:200])
+    return events
+
+
+def _initial_file_statuses(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    files = [
+        _file_status("file_invoice", metadata["invoiceFile"], "invoice_excel", "pending", 0, 0, 0, None),
+        _file_status("file_cashflow", metadata["cashflowFile"], "cashflow_excel", "pending", 0, 0, 0, None),
+    ]
+    files.extend(
+        _file_status(f"file_settlement_{index:03d}", name, _settlement_type(Path(name)), "pending", 0, 0, 0, None)
+        for index, name in enumerate(metadata.get("settlementFiles", []), start=1)
+    )
+    return files
+
+
+def _replace_file_status(files: list[dict[str, Any]], status: dict[str, Any]) -> None:
+    for index, item in enumerate(files):
+        if item.get("fileId") == status.get("fileId"):
+            files[index] = status
+            return
+    files.append(status)
 
 
 def _file_status(file_id: str, file_name: str, file_type: str, status: str, parsed: int, valid: int, confidence: float, reason: str | None) -> dict[str, Any]:
