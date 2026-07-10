@@ -41,3 +41,5 @@ tmp/
 # Generated previews / inspection files
 output/preview_*.png
 output/*.inspect.ndjson
+test-ollm/
+server/storage/
