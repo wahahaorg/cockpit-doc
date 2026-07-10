@@ -37,6 +37,13 @@ const fileTypeLabels: Record<string, string> = {
 };
 
 const money = (value?: number | string | null) => `¥${Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const JOB_ID_QUERY_PARAM = 'jobId';
+const jobIdFromUrl = () => new URL(window.location.href).searchParams.get(JOB_ID_QUERY_PARAM)?.trim();
+const replaceJobIdInUrl = (jobId: string) => {
+  const url = new URL(window.location.href);
+  url.searchParams.set(JOB_ID_QUERY_PARAM, jobId);
+  window.history.replaceState(window.history.state, '', url);
+};
 const uploadFile = (file?: UploadNativeFile): UploadFile[] => file ? [{ uid: file.uid || file.name, name: file.name, status: 'done' }] : [];
 const uploadFiles = (files: UploadNativeFile[]): UploadFile[] => files.map((file) => ({ uid: file.uid || file.name, name: file.name, status: 'done' }));
 const fileKey = (file: UploadNativeFile | UploadFile) => file.uid || file.name;
@@ -80,6 +87,7 @@ export default function IncomeReconciliation() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [parseEvents, setParseEvents] = useState<IncomeReconciliationProgressEvent[]>([]);
   const [eventPolling, setEventPolling] = useState(false);
+  const [restoringJob, setRestoringJob] = useState(false);
 
   const files = job?.files || [];
   const currentStatus = job?.status;
@@ -98,6 +106,31 @@ export default function IncomeReconciliation() {
     warning: files.filter((file) => file.parseStatus === 'warning' || file.parseStatus === 'needs_ocr').length,
     failed: files.filter((file) => file.parseStatus === 'failed').length,
   };
+
+  useEffect(() => {
+    const jobId = jobIdFromUrl();
+    if (!jobId) return;
+
+    let cancelled = false;
+    setRestoringJob(true);
+    api.incomeReconciliationEvents(jobId)
+      .then((result) => {
+        if (cancelled) return;
+        setJob(result.value.data.job);
+        setParseEvents(result.value.data.events.slice(-80));
+        setMock(result.mock);
+      })
+      .catch((error) => {
+        if (!cancelled) message.error(error instanceof Error ? error.message : '历史任务恢复失败');
+      })
+      .finally(() => {
+        if (!cancelled) setRestoringJob(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!job?.jobId || !isPolling) return;
@@ -163,6 +196,7 @@ export default function IncomeReconciliation() {
     try {
       const result = await api.createIncomeReconciliationJob({ invoiceFile, cashflowFile, settlementFiles });
       setJob(result.value.data);
+      replaceJobIdInUrl(result.value.data.jobId);
       setMock(result.mock);
       message.success('任务已创建');
     } catch (error) {
@@ -251,7 +285,7 @@ export default function IncomeReconciliation() {
                   <Button icon={<CloudUploadOutlined />}>选择多个结算单</Button>
                 </Upload>
               </Form.Item>
-              <Button type="primary" block size="large" loading={busy || isPolling || currentStatus === 'parsing'} disabled={currentStatus === 'parsing'} icon={mainAction.icon} onClick={runMainAction}>{mainAction.label}</Button>
+              <Button type="primary" block size="large" loading={restoringJob || busy || isPolling || currentStatus === 'parsing'} disabled={restoringJob || currentStatus === 'parsing'} icon={mainAction.icon} onClick={runMainAction}>{restoringJob ? '正在恢复任务' : mainAction.label}</Button>
             </Form>
           </Card>
         </Col>
