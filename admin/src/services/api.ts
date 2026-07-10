@@ -1,5 +1,5 @@
-import type { AccountBalance, Collection, ImportBatch, ImportDetail, ImportRow, ObjectResult, Overview, PageResult, PlannedExpense, Receivable, ValidationError } from '@/types/api';
-import * as mock from './mock'; import { request } from './http';
+import type { AccountBalance, Collection, ImportBatch, ImportDetail, ImportRow, IncomeReconciliationFileResult, IncomeReconciliationJob, ObjectResult, Overview, PageResult, PlannedExpense, Receivable, ValidationError } from '@/types/api';
+import * as mock from './mock'; import { apiUrl, request } from './http';
 const page = <T>(data: T[]): PageResult<T> => ({ data, pagination: { page: 1, pageSize: 20, total: data.length, totalPages: 1 } });
 const generateUUID = (): string => { if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID(); return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); }); };
 export const api = {
@@ -14,4 +14,10 @@ export const api = {
   collections: () => request<PageResult<Collection>>('/collections?page=1&pageSize=20', undefined, () => page(mock.collections)),
   expenses: () => request<PageResult<PlannedExpense>>('/planned-expenses?page=1&pageSize=20', undefined, () => page(mock.expenses)),
   overview: () => request<ObjectResult<Overview>>('/cockpit/overview', undefined, () => ({ data: mock.overview })),
+  createIncomeReconciliationJob: (payload: { invoiceFile: File; cashflowFile: File; settlementFiles: File[] }) => { const data = new FormData(); data.append('invoice_file', payload.invoiceFile); data.append('cashflow_file', payload.cashflowFile); payload.settlementFiles.forEach((file) => data.append('settlement_files[]', file)); return request<ObjectResult<IncomeReconciliationJob>>('/income-reconciliation/jobs', { method: 'POST', body: data }, () => ({ data: { ...mock.incomeJob, status: 'uploaded', files: payload.settlementFiles.length ? mock.incomeJob.files : [] } })); },
+  incomeReconciliationJob: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}`, undefined, () => ({ data: { ...mock.incomeJob, jobId } })),
+  parseIncomeReconciliationJob: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/parse`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'parsed' } })),
+  generateIncomeReconciliationExcel: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/generate`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'generated' } })),
+  incomeReconciliationFileResult: (jobId: string, fileId: string) => request<ObjectResult<IncomeReconciliationFileResult>>(`/income-reconciliation/jobs/${jobId}/files/${fileId}`, undefined, () => ({ data: mock.incomeFileResult(fileId) })),
+  incomeReconciliationDownloadUrl: (jobId: string) => apiUrl(`/income-reconciliation/jobs/${jobId}/download`),
 };

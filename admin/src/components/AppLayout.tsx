@@ -1,11 +1,12 @@
 import { useSyncExternalStore, type PropsWithChildren } from 'react';
-import { DatabaseOutlined, FileSearchOutlined, FundOutlined, ImportOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
+import { AuditOutlined, DatabaseOutlined, FileSearchOutlined, FundOutlined, ImportOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { Layout, Menu, Space, Tag, Typography } from 'antd';
 import { history } from '@umijs/max';
 
 const items = [
   { key: '/workbench', icon: <FundOutlined />, label: '工作台' },
   { key: '/imports', icon: <ImportOutlined />, label: '导入批次' },
+  { key: '/income-reconciliation', icon: <AuditOutlined />, label: '收入核对' },
   { key: '/data-preview', icon: <DatabaseOutlined />, label: '数据预览' },
   { key: '/metrics', icon: <FileSearchOutlined />, label: '指标核对' },
 ];
@@ -18,9 +19,11 @@ export default function AppLayout({ children }: PropsWithChildren) {
   );
   const selectedPath = pathname.startsWith('/imports')
     ? '/imports'
-    : pathname.startsWith('/metrics')
-      ? '/metrics'
-      : pathname;
+    : pathname.startsWith('/income-reconciliation')
+      ? '/income-reconciliation'
+      : pathname.startsWith('/metrics')
+        ? '/metrics'
+        : pathname;
 
   return <Layout style={{ minHeight: '100vh' }}>
     <Layout.Sider width={232} theme="light" style={{ borderRight: '1px solid #e5ebef' }}>

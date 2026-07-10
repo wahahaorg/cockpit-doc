@@ -14,3 +14,41 @@ export interface Collection { id: string; collectionNo: string; receivableId: st
 export interface PlannedExpense { id: string; expenseNo: string; expenseName: string; plannedAmount: string; plannedDate: string; approvalStatus: string }
 export interface Metrics { availableCash: string; expectedCollections: string; actualCollections: string; plannedExpenses: string; cashGap: string; overdueAmount: string; todayTaskCount: number }
 export interface Overview { asOfDate: string; batchId: string; ruleVersion: string; reviewStatus: string; metrics: Metrics; warnings: string[] }
+export type IncomeReconciliationStatus = 'uploaded' | 'parsing' | 'parsed' | 'parse_failed' | 'generating' | 'generated' | 'generate_failed';
+export type IncomeReconciliationFileStatus = 'pending' | 'parsing' | 'success' | 'failed' | 'needs_ocr' | 'warning';
+export interface IncomeReconciliationFile {
+  fileId: string;
+  fileName: string;
+  fileType: 'invoice_excel' | 'cashflow_excel' | 'settlement_excel' | 'settlement_pdf' | 'settlement_docx' | 'settlement_file' | string;
+  parseStatus: IncomeReconciliationFileStatus;
+  parsedRows?: number;
+  validRows?: number;
+  confidence?: number;
+  errorReason?: string | null;
+  parseReason?: string | null;
+}
+export interface IncomeReconciliationSummary {
+  confirmedRevenue: number;
+  receivedAmount: number;
+  unreceivedAmount: number;
+  normalCount: number;
+  abnormalCount: number;
+  invalidInvoiceCount: number;
+  manualCheckRequiredCount: number;
+}
+export interface IncomeReconciliationJob {
+  jobId: string;
+  status: IncomeReconciliationStatus;
+  files?: IncomeReconciliationFile[];
+  summary?: IncomeReconciliationSummary | null;
+  downloadUrl?: string | null;
+  periodStart?: string;
+  periodEnd?: string;
+}
+export interface IncomeReconciliationFileResult {
+  fileId: string;
+  fileName: string;
+  rawText?: string;
+  aiExtractedJson?: unknown;
+  standardJson?: unknown;
+}

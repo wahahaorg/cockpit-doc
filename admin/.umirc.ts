@@ -13,6 +13,7 @@ export default defineConfig({
     { path: '/workbench', component: 'workbench' },
     { path: '/imports', component: 'imports' },
     { path: '/imports/:id', component: 'imports/detail' },
+    { path: '/income-reconciliation', component: 'income-reconciliation' },
     { path: '/data-preview', component: 'data-preview' },
     { path: '/metrics', component: 'metrics' },
     { path: '/metrics/detail', component: 'metrics/detail' },
