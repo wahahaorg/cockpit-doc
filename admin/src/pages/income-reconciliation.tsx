@@ -39,6 +39,7 @@ const fileTypeLabels: Record<string, string> = {
 const money = (value?: number | string | null) => `¥${Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const uploadFile = (file?: UploadNativeFile): UploadFile[] => file ? [{ uid: file.uid || file.name, name: file.name, status: 'done' }] : [];
 const uploadFiles = (files: UploadNativeFile[]): UploadFile[] => files.map((file) => ({ uid: file.uid || file.name, name: file.name, status: 'done' }));
+const fileKey = (file: UploadNativeFile | UploadFile) => file.uid || file.name;
 const jsonBlock = (value: unknown) => <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{value ? JSON.stringify(value, null, 2) : '后端暂未返回该段解析结果'}</pre>;
 const eventTime = (value?: string) => value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
 const eventRows = (event: IncomeReconciliationProgressEvent) => event.parsedRows ?? event.parsed_rows;
@@ -236,8 +237,17 @@ export default function IncomeReconciliation() {
                   <Button icon={<FileExcelOutlined />}>选择服务收支明细</Button>
                 </Upload>
               </Form.Item>
-              <Form.Item label="结算单文件">
-                <Upload multiple accept=".xlsx,.xls,.pdf,.doc,.docx" fileList={uploadFiles(settlementFiles)} beforeUpload={(file) => { setSettlementFiles((current) => [...current, file as UploadNativeFile]); return false; }} onRemove={(file) => { setSettlementFiles((current) => current.filter((item) => (item.uid || item.name) !== file.uid)); return true; }}>
+              <Form.Item
+                label={<Space size={8}><span>结算单文件</span>{settlementFiles.length > 0 && <Tag color="blue">已选 {settlementFiles.length}</Tag>}</Space>}
+              >
+                <Upload
+                  className="settlement-upload"
+                  multiple
+                  accept=".xlsx,.xls,.pdf,.doc,.docx"
+                  fileList={uploadFiles(settlementFiles)}
+                  beforeUpload={(file) => { setSettlementFiles((current) => [...current, file as UploadNativeFile]); return false; }}
+                  onRemove={(file) => { setSettlementFiles((current) => current.filter((item) => fileKey(item) !== fileKey(file))); return true; }}
+                >
                   <Button icon={<CloudUploadOutlined />}>选择多个结算单</Button>
                 </Upload>
               </Form.Item>
