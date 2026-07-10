@@ -45,6 +45,32 @@ export interface IncomeReconciliationJob {
   periodStart?: string;
   periodEnd?: string;
 }
+export interface IncomeReconciliationProgressEvent {
+  seq?: number;
+  type: string;
+  message?: string;
+  createdAt?: string;
+  fileId?: string;
+  file_id?: string;
+  fileName?: string;
+  file_name?: string;
+  stage?: string;
+  progress?: number;
+  parsedRows?: number;
+  parsed_rows?: number;
+  validRows?: number;
+  valid_rows?: number;
+  confidence?: number;
+  reason?: string | null;
+  model?: string | null;
+  textChars?: number;
+  text_chars?: number;
+  status?: IncomeReconciliationStatus;
+}
+export interface IncomeReconciliationProgressSnapshot {
+  job: IncomeReconciliationJob;
+  events: IncomeReconciliationProgressEvent[];
+}
 export interface IncomeReconciliationFileResult {
   fileId: string;
   fileName: string;

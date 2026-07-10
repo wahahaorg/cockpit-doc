@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CloudUploadOutlined, DownloadOutlined, EyeOutlined, FileExcelOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Button, Card, Col, Descriptions, Drawer, Form, message, Row, Space, Statistic, Table, Tabs, Tag, Typography, Upload } from 'antd';
+import { CheckCircleOutlined, ClockCircleOutlined, CloudUploadOutlined, DownloadOutlined, EyeOutlined, FileExcelOutlined, LoadingOutlined, PlayCircleOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
+import { Button, Card, Col, Descriptions, Drawer, Form, message, Progress, Row, Space, Statistic, Table, Tabs, Tag, Timeline, Typography, Upload } from 'antd';
 import type { UploadFile } from 'antd';
 import PageHeader from '@/components/PageHeader';
 import { api } from '@/services/api';
-import type { IncomeReconciliationFile, IncomeReconciliationFileResult, IncomeReconciliationJob, IncomeReconciliationStatus } from '@/types/api';
+import type { IncomeReconciliationFile, IncomeReconciliationFileResult, IncomeReconciliationJob, IncomeReconciliationProgressEvent, IncomeReconciliationStatus } from '@/types/api';
 
 type UploadNativeFile = File & { uid?: string };
 
@@ -40,6 +40,33 @@ const money = (value?: number | string | null) => `¥${Number(value || 0).toLoca
 const uploadFile = (file?: UploadNativeFile): UploadFile[] => file ? [{ uid: file.uid || file.name, name: file.name, status: 'done' }] : [];
 const uploadFiles = (files: UploadNativeFile[]): UploadFile[] => files.map((file) => ({ uid: file.uid || file.name, name: file.name, status: 'done' }));
 const jsonBlock = (value: unknown) => <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{value ? JSON.stringify(value, null, 2) : '后端暂未返回该段解析结果'}</pre>;
+const eventTime = (value?: string) => value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--';
+const eventRows = (event: IncomeReconciliationProgressEvent) => event.parsedRows ?? event.parsed_rows;
+const eventValidRows = (event: IncomeReconciliationProgressEvent) => event.validRows ?? event.valid_rows;
+const eventTextChars = (event: IncomeReconciliationProgressEvent) => event.textChars ?? event.text_chars;
+const eventFileId = (event: IncomeReconciliationProgressEvent) => event.fileId ?? event.file_id;
+const eventFileName = (event: IncomeReconciliationProgressEvent) => event.fileName ?? event.file_name;
+const stageLabels: Record<string, string> = {
+  excel_parse: 'Excel 解析',
+  settlement_parse: '结算单解析',
+  text_extract: '文本提取',
+  ai_extract: 'AI 抽取',
+  standardize: '字段标准化',
+};
+
+const eventColor = (event: IncomeReconciliationProgressEvent) => {
+  if (event.type.includes('failed')) return 'red';
+  if (event.type.includes('done')) return 'green';
+  if (event.type.includes('started') || event.type === 'job_queued') return 'blue';
+  return 'gray';
+};
+
+const eventDot = (event: IncomeReconciliationProgressEvent) => {
+  if (event.type.includes('failed')) return <WarningOutlined />;
+  if (event.type.includes('done')) return <CheckCircleOutlined />;
+  if (event.type.includes('started') || event.type === 'job_queued') return <LoadingOutlined spin />;
+  return <ClockCircleOutlined />;
+};
 
 export default function IncomeReconciliation() {
   const [invoiceFile, setInvoiceFile] = useState<UploadNativeFile>();
@@ -50,11 +77,26 @@ export default function IncomeReconciliation() {
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<IncomeReconciliationFileResult>();
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [parseEvents, setParseEvents] = useState<IncomeReconciliationProgressEvent[]>([]);
+  const [eventPolling, setEventPolling] = useState(false);
 
   const files = job?.files || [];
   const currentStatus = job?.status;
-  const isPolling = currentStatus === 'parsing' || currentStatus === 'generating';
+  const isPolling = currentStatus === 'generating';
   const summary = job?.summary;
+  const latestProgress = parseEvents.reduce((value, event) => Math.max(value, Number(event.progress || 0)), currentStatus === 'parsed' || currentStatus === 'generated' ? 100 : 0);
+  const visibleEvents = (parseEvents.length ? parseEvents : [{ type: 'job_queued', message: '等待解析事件返回', createdAt: undefined }]).slice(-12).reverse();
+  const currentEvent = [...parseEvents].reverse().find((event) => eventFileId(event));
+  const currentFileId = currentEvent ? eventFileId(currentEvent) : undefined;
+  const currentFile = currentFileId ? files.find((file) => file.fileId === currentFileId) : undefined;
+  const currentStage = currentEvent?.stage;
+  const fileSummary = {
+    total: files.length,
+    success: files.filter((file) => file.parseStatus === 'success').length,
+    parsing: files.filter((file) => file.parseStatus === 'parsing' || file.parseStatus === 'pending').length,
+    warning: files.filter((file) => file.parseStatus === 'warning' || file.parseStatus === 'needs_ocr').length,
+    failed: files.filter((file) => file.parseStatus === 'failed').length,
+  };
 
   useEffect(() => {
     if (!job?.jobId || !isPolling) return;
@@ -69,6 +111,36 @@ export default function IncomeReconciliation() {
     }, 2500);
     return () => window.clearInterval(timer);
   }, [job?.jobId, isPolling]);
+
+  useEffect(() => {
+    if (!job?.jobId || currentStatus !== 'parsing') {
+      setEventPolling(false);
+      return;
+    }
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await api.incomeReconciliationEvents(job.jobId);
+        if (cancelled) return;
+        setJob(result.value.data.job);
+        setParseEvents(result.value.data.events.slice(-80));
+        setMock(result.mock);
+        setEventPolling(true);
+      } catch (error) {
+        if (!cancelled) {
+          setEventPolling(false);
+          message.warning(error instanceof Error ? error.message : '解析事件刷新失败');
+        }
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      setEventPolling(false);
+    };
+  }, [job?.jobId, currentStatus]);
 
   const mainAction = useMemo(() => {
     if (!job) return { label: '上传并创建任务', icon: <CloudUploadOutlined /> };
@@ -105,14 +177,27 @@ export default function IncomeReconciliation() {
       window.open(job.downloadUrl || api.incomeReconciliationDownloadUrl(job.jobId), '_blank');
       return;
     }
+    if (currentStatus === 'uploaded' || currentStatus === 'parse_failed') {
+      setBusy(true);
+      setParseEvents([{ type: 'job_queued', message: '正在启动后台解析', createdAt: new Date().toISOString(), progress: 1 }]);
+      try {
+        const result = await api.parseIncomeReconciliationJob(job.jobId, true);
+        setJob(result.value.data);
+        setMock(result.mock);
+        message.success('已开始解析');
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : '解析启动失败');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     setBusy(true);
     try {
-      const result = currentStatus === 'uploaded' || currentStatus === 'parse_failed'
-        ? await api.parseIncomeReconciliationJob(job.jobId)
-        : await api.generateIncomeReconciliationExcel(job.jobId);
+      const result = await api.generateIncomeReconciliationExcel(job.jobId);
       setJob(result.value.data);
       setMock(result.mock);
-      message.success(currentStatus === 'parsed' || currentStatus === 'generate_failed' ? '已开始生成核对表' : '已开始解析');
+      message.success(currentStatus === 'parsed' || currentStatus === 'generate_failed' ? '已开始生成核对表' : '操作已提交');
     } catch (error) {
       message.error(error instanceof Error ? error.message : '操作失败');
     } finally {
@@ -156,7 +241,7 @@ export default function IncomeReconciliation() {
                   <Button icon={<CloudUploadOutlined />}>选择多个结算单</Button>
                 </Upload>
               </Form.Item>
-              <Button type="primary" block size="large" loading={busy || isPolling} icon={mainAction.icon} onClick={runMainAction}>{mainAction.label}</Button>
+              <Button type="primary" block size="large" loading={busy || isPolling || currentStatus === 'parsing'} disabled={currentStatus === 'parsing'} icon={mainAction.icon} onClick={runMainAction}>{mainAction.label}</Button>
             </Form>
           </Card>
         </Col>
@@ -166,7 +251,61 @@ export default function IncomeReconciliation() {
               { key: 'jobId', label: '任务 ID', children: job?.jobId || '尚未创建' },
               { key: 'status', label: '状态', children: currentStatus ? <Tag color={statusMeta[currentStatus]?.color}>{statusMeta[currentStatus]?.text}</Tag> : <Tag>待上传</Tag> },
             ]} />
+            {(currentStatus === 'parsing' || parseEvents.length > 0) && (
+              <div className="parse-progress">
+                <Typography.Text type="secondary">总体进度</Typography.Text>
+                <Progress percent={Math.min(Math.round(latestProgress), 100)} status={currentStatus === 'parse_failed' ? 'exception' : currentStatus === 'parsed' ? 'success' : 'active'} />
+              </div>
+            )}
           </Card>
+          {(currentStatus === 'parsing' || parseEvents.length > 0) && (
+            <Card
+              className="audit-card"
+              title="解析过程"
+              style={{ marginTop: 16 }}
+              extra={<Space size={6}><span className={eventPolling ? 'stream-dot is-live' : 'stream-dot'} /> <Typography.Text type={eventPolling ? 'success' : 'secondary'}>{eventPolling ? '轮询刷新中' : '等待刷新'}</Typography.Text></Space>}
+            >
+              <div className="parse-timeline-scroll">
+                <Timeline
+                  className="parse-timeline"
+                  items={visibleEvents.map((event, index) => ({
+                    color: eventColor(event),
+                    dot: eventDot(event),
+                    children: (
+                      <div className="parse-event" key={`${event.seq || index}-${event.type}`}>
+                        <div className="parse-event-main">
+                          <Typography.Text className="parse-event-time">{eventTime(event.createdAt)}</Typography.Text>
+                          <Typography.Text className="parse-event-message" strong>{event.message || event.type}</Typography.Text>
+                        </div>
+                        <div className="parse-event-meta">
+                          {eventFileName(event) && <span>{eventFileName(event)}</span>}
+                          {event.stage && <Tag>{stageLabels[event.stage] || event.stage}</Tag>}
+                          {eventRows(event) != null && <span>{eventRows(event)} 行</span>}
+                          {eventValidRows(event) != null && <span>{eventValidRows(event)} 有效</span>}
+                          {eventTextChars(event) != null && <span>{eventTextChars(event)} 字</span>}
+                          {event.confidence != null && <span>置信度 {Math.round(event.confidence * 100)}%</span>}
+                          {event.reason && <Typography.Text type="danger">{event.reason}</Typography.Text>}
+                        </div>
+                      </div>
+                    ),
+                  }))}
+                />
+              </div>
+              {currentEvent && (
+                <div className="current-file-panel">
+                  <div>
+                    <Typography.Text type="secondary">当前处理文件</Typography.Text>
+                    <Typography.Title level={5}>{eventFileName(currentEvent) || currentFile?.fileName}</Typography.Title>
+                  </div>
+                  <Space wrap>
+                    {['text_extract', 'ai_extract', 'standardize', 'settlement_parse'].map((stage) => (
+                      <Tag key={stage} color={currentStage === stage ? 'blue' : currentEvent.type.includes('done') ? 'green' : 'default'}>{stageLabels[stage]}</Tag>
+                    ))}
+                  </Space>
+                </div>
+              )}
+            </Card>
+          )}
           <Row gutter={16} style={{ marginTop: 16 }}>
             {[
               ['确认收入总额', money(summary?.confirmedRevenue), '按结算单/发票确认'],
@@ -177,16 +316,21 @@ export default function IncomeReconciliation() {
           </Row>
         </Col>
       </Row>
-      <Card className="audit-card" title="文件解析列表" style={{ marginTop: 16 }}>
-        <Table rowKey="fileId" dataSource={files} pagination={false} columns={[
-          { title: '文件名', dataIndex: 'fileName' },
-          { title: '类型', dataIndex: 'fileType', render: (value: string) => fileTypeLabels[value] || value },
-          { title: '状态', dataIndex: 'parseStatus', render: (value: string) => <Tag color={fileStatusMeta[value]?.color}>{fileStatusMeta[value]?.text || value}</Tag> },
-          { title: '行数', dataIndex: 'parsedRows', render: (value) => value ?? '-' },
-          { title: '有效行数', dataIndex: 'validRows', render: (value) => value ?? '-' },
-          { title: '置信度', dataIndex: 'confidence', render: (value?: number) => value == null ? '-' : `${Math.round(value * 100)}%` },
-          { title: '原因', render: (_, record) => record.errorReason || record.parseReason || '-' },
-          { title: '操作', render: (_, record) => <Button icon={<EyeOutlined />} onClick={() => openPreview(record)}>查看解析结果</Button> },
+      <Card
+        className="audit-card file-list-card"
+        title="文件解析列表"
+        style={{ marginTop: 16 }}
+        extra={<Space wrap size={[8, 4]}><Tag>共 {fileSummary.total} 个文件</Tag><Tag color="green">成功 {fileSummary.success}</Tag><Tag color="processing">待/解析中 {fileSummary.parsing}</Tag><Tag color="orange">警告 {fileSummary.warning}</Tag><Tag color="red">失败 {fileSummary.failed}</Tag></Space>}
+      >
+        <Table rowKey="fileId" dataSource={files} pagination={false} scroll={{ y: 320, x: 1040 }} tableLayout="fixed" columns={[
+          { title: '文件名', dataIndex: 'fileName', width: 260, ellipsis: true, render: (value: string) => <Typography.Text title={value} ellipsis>{value}</Typography.Text> },
+          { title: '类型', dataIndex: 'fileType', width: 150, ellipsis: true, render: (value: string) => fileTypeLabels[value] || value },
+          { title: '状态', dataIndex: 'parseStatus', width: 90, render: (value: string) => <Tag color={fileStatusMeta[value]?.color}>{fileStatusMeta[value]?.text || value}</Tag> },
+          { title: '行数', dataIndex: 'parsedRows', width: 80, render: (value) => value ?? '-' },
+          { title: '有效行数', dataIndex: 'validRows', width: 100, render: (value) => value ?? '-' },
+          { title: '置信度', dataIndex: 'confidence', width: 90, render: (value?: number) => value == null ? '-' : `${Math.round(value * 100)}%` },
+          { title: '原因', width: 150, ellipsis: true, render: (_, record) => record.errorReason || record.parseReason || '-' },
+          { title: '操作', width: 120, render: (_, record) => <Button icon={<EyeOutlined />} onClick={() => openPreview(record)}>查看解析结果</Button> },
         ]} />
       </Card>
       <Drawer width={720} title={preview?.fileName || '解析结果'} open={!!preview || previewLoading} loading={previewLoading} onClose={() => setPreview(undefined)}>

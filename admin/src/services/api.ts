@@ -1,4 +1,4 @@
-import type { AccountBalance, Collection, ImportBatch, ImportDetail, ImportRow, IncomeReconciliationFileResult, IncomeReconciliationJob, ObjectResult, Overview, PageResult, PlannedExpense, Receivable, ValidationError } from '@/types/api';
+import type { AccountBalance, Collection, ImportBatch, ImportDetail, ImportRow, IncomeReconciliationFileResult, IncomeReconciliationJob, IncomeReconciliationProgressSnapshot, ObjectResult, Overview, PageResult, PlannedExpense, Receivable, ValidationError } from '@/types/api';
 import * as mock from './mock'; import { apiUrl, request } from './http';
 const page = <T>(data: T[]): PageResult<T> => ({ data, pagination: { page: 1, pageSize: 20, total: data.length, totalPages: 1 } });
 const generateUUID = (): string => { if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID(); return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); }); };
@@ -16,8 +16,9 @@ export const api = {
   overview: () => request<ObjectResult<Overview>>('/cockpit/overview', undefined, () => ({ data: mock.overview })),
   createIncomeReconciliationJob: (payload: { invoiceFile: File; cashflowFile: File; settlementFiles: File[] }) => { const data = new FormData(); data.append('invoice_file', payload.invoiceFile); data.append('cashflow_file', payload.cashflowFile); payload.settlementFiles.forEach((file) => data.append('settlement_files[]', file)); return request<ObjectResult<IncomeReconciliationJob>>('/income-reconciliation/jobs', { method: 'POST', body: data }, () => ({ data: { ...mock.incomeJob, status: 'uploaded', files: payload.settlementFiles.length ? mock.incomeJob.files : [] } })); },
   incomeReconciliationJob: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}`, undefined, () => ({ data: { ...mock.incomeJob, jobId } })),
-  parseIncomeReconciliationJob: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/parse`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'parsed' } })),
+  parseIncomeReconciliationJob: (jobId: string, background = false) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/parse${background ? '?background=true' : ''}`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: background ? 'parsing' : 'parsed' } })),
   generateIncomeReconciliationExcel: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/generate`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'generated' } })),
   incomeReconciliationFileResult: (jobId: string, fileId: string) => request<ObjectResult<IncomeReconciliationFileResult>>(`/income-reconciliation/jobs/${jobId}/files/${fileId}`, undefined, () => ({ data: mock.incomeFileResult(fileId) })),
+  incomeReconciliationEvents: (jobId: string) => request<ObjectResult<IncomeReconciliationProgressSnapshot>>(`/income-reconciliation/jobs/${jobId}/events.json`, undefined, () => ({ data: { job: { ...mock.incomeJob, jobId }, events: [] } })),
   incomeReconciliationDownloadUrl: (jobId: string) => apiUrl(`/income-reconciliation/jobs/${jobId}/download`),
 };
