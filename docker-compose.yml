@@ -33,6 +33,8 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-ollama}
       AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-60}
       AI_MAX_RETRIES: ${AI_MAX_RETRIES:-1}
+      INCOME_RECONCILIATION_AI_ENABLED: ${INCOME_RECONCILIATION_AI_ENABLED:-true}
+      INCOME_RECONCILIATION_STORAGE_DIR: ${INCOME_RECONCILIATION_STORAGE_DIR:-storage}
     # 如果 Ollama 跑在宿主机本身（而非远程 IP），
     # 把 .env 里 OLLAMA_BASE_URL 改为 http://host-gateway:11434/v1
     extra_hosts:
