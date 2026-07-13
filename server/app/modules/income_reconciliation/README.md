@@ -66,7 +66,6 @@ POST /jobs/{id}/parse ──► parse_job()   解析三个文件
     └── _parse_settlement()        处理结算单
             ├── _extract_settlement_text()  提取原始文本
             └── _extract_settlement_with_ai()  AI 抽取结构化字段
-                    └── _heuristic_settlement_extract()  规则兜底
     │
     ▼
 POST /jobs/{id}/generate ──► generate_job()  三方核对 + 导出
@@ -368,46 +367,22 @@ def _get_ocr():            # 📄 本文件
 
 ---
 
-### 4.3 AI 提取与兜底规则
+### 4.3 AI 提取
 
 #### `_extract_settlement_with_ai()` — 📄 本文件
 
 | 调用 | 来源 | 作用 |
 |---|---|---|
-| `get_settings()` | 📦 `app.core.config` | 读取配置（AI 是否启用、模型、超时等） |
-| `_parse_filename_hint(file_name)` | 📄 本文件 | 从文件名提取提示信息 |
+| `get_settings()` | 📦 `app.core.config` | 读取模型与超时配置 |
 | `ai_available()` | 📦 `app.modules.ai.client` | 检查 AI 是否可用 |
-| `get_chat_model().invoke(prompt)` | 📦 `app.modules.ai.client` | 调用 LLM |
-| `_json_from_text(content)` | 📄 本文件 | 从 LLM 返回文本提取 JSON |
-| `_heuristic_settlement_extract(text, file_name)` | 📄 本文件 | 规则兜底（AI 不可用时） |
+| `get_chat_model().with_structured_output(...).invoke(prompt)` | 📦 `app.modules.ai.client` | 调用 LLM 并验证结构化结果 |
 | `logger.info()` | 🐍 `logging` | 性能日志 |
 
 **流程**：
-1. 检查 `settings.income_reconciliation_ai_enabled` + `ai_available()`
-2. 构造 prompt → 调用 `get_chat_model().invoke(prompt)`
-3. 从 LLM 返回中抽 JSON → 验证结构
-4. AI 失败/不可用 → `_heuristic_settlement_extract()` 规则兜底
-
-#### `_heuristic_settlement_extract()` — 📄 本文件（纯正则兜底）
-
-| 调用 | 来源 | 作用 |
-|---|---|---|
-| `_match_first(text, patterns)` | 📄 本文件 | 依次尝试多个正则模式 |
-| `_parse_filename_hint(file_name)` | 📄 本文件 | 文件名信息 |
-| `_month_text()` | 📄 本文件 | 标准化月份文本 |
-| `_float()` / `_money()` | 📄 本文件 | 金额标准化 |
-| `re.sub()` | 🐍 `re` | 清理文本 |
-
-#### `_parse_filename_hint()` — 📄 本文件
-- 从文件名用正则提取客户名、月份、金额信息
-- 使用 🐍 `re.search()` 匹配命名分组 `(?P<name>...)`
-
-#### `_clean_filename_customer()` — 📄 本文件
-- 清理文件名中的客户名称（去日期前缀、去"结算单"后缀）
-
-#### `_json_from_text()` — 📄 本文件
-- `re.search(r"\{.*\}", text, re.S)` 提取第一个 JSON 对象
-- `json.loads()` → 🐍
+1. 检查 `ai_available()`
+2. 构造 prompt → 调用带 JSON Schema 的模型
+3. 验证结构化返回结果
+4. AI 失败/不可用 → 标记文件解析失败，可通过重试接口再次发起 AI 抽取
 
 ---
 

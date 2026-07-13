@@ -1,5 +1,6 @@
 import json
 import logging
+import mimetypes
 import re
 import shutil
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+import httpx
 from fastapi import UploadFile
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
@@ -506,7 +508,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
         from app.modules.ai.client import ai_available, get_chat_model
 
         ai_enabled = ai_available()
-        if settings.income_reconciliation_ai_enabled and ai_enabled:
+        if ai_enabled:
             started_at = time.monotonic()
             logger.info(
                 "income_reconciliation_ai_call_started file=%s model=%s base_url=%s prompt_chars=%d text_chars=%d timeout_seconds=%d",
@@ -559,9 +561,8 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
             return {"status": "failed", "records": [], "model": settings.ai_model, "error": error, "rawResponse": content, "triedAt": tried_at}
         else:
             logger.info(
-                "income_reconciliation_ai_skipped file=%s income_ai_enabled=%s ai_enabled=%s",
+                "income_reconciliation_ai_skipped file=%s ai_enabled=%s",
                 file_name,
-                settings.income_reconciliation_ai_enabled,
                 ai_enabled,
             )
             return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 服务未启用或当前不可用", "triedAt": tried_at}
@@ -830,7 +831,7 @@ def _merge_text(*parts: str) -> str:
     return "\n".join(lines)
 
 
-# ── OCR 引擎（基于 rapidocr-onnxruntime） ──────────────────────────────────────
+# ── OCR 服务及本地兜底 ────────────────────────────────────────────────────────
 
 _ocr_engine = None
 
@@ -844,19 +845,54 @@ def _get_ocr():
     return _ocr_engine
 
 
-def _ocr_image(path: Path) -> tuple[str, str, str | None]:
-    """对单张图片执行 OCR，返回 (text, status, error_message)。"""
+def _ocr_with_service(path: Path) -> tuple[str, str, str | None]:
+    settings = get_settings()
+    if not settings.ocr_service_url:
+        return "", "failed", "未配置 OCR 服务地址"
     try:
-        ocr = _get_ocr()
-        result, elapse = ocr(str(path))
+        with path.open("rb") as file:
+            response = httpx.post(
+                settings.ocr_service_url,
+                files={"file": (path.name, file, mimetypes.guess_type(path.name)[0] or "application/octet-stream")},
+                timeout=settings.ocr_service_timeout_seconds,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not text and isinstance(payload, dict) and isinstance(payload.get("lines"), list):
+            text = "\n".join(
+                str(item.get("text") or "").strip()
+                for item in payload["lines"]
+                if isinstance(item, dict) and item.get("text")
+            )
+        if isinstance(text, str) and text.strip():
+            return text.strip(), "success", None
+        return "", "needs_ocr", "PaddleOCR 服务未识别到有效文本"
+    except Exception as exc:
+        logger.warning("income_reconciliation_remote_ocr_failed file=%s url=%s error=%s", path.name, settings.ocr_service_url, exc)
+        return "", "failed", f"PaddleOCR 服务调用失败：{exc}"
+
+
+def _ocr_with_local_engine(path: Path) -> tuple[str, str, str | None]:
+    try:
+        result, _elapse = _get_ocr()(str(path))
         if result is None:
             return "", "needs_ocr", "OCR 未识别到有效文本"
-        lines = [item[1] for item in result]
-        return "\n".join(lines), "success", None
+        return "\n".join(item[1] for item in result), "success", None
     except ImportError:
         return "", "needs_ocr", "OCR 引擎未安装，请安装 rapidocr-onnxruntime"
     except Exception as exc:
         return "", "failed", f"OCR 识别失败：{exc}"
+
+
+def _ocr_image(path: Path) -> tuple[str, str, str | None]:
+    """对单张图片执行 OCR，返回 (text, status, error_message)。"""
+    settings = get_settings()
+    if settings.ocr_service_url:
+        remote_result = _ocr_with_service(path)
+        if remote_result[1] == "success" or not settings.ocr_local_fallback_enabled:
+            return remote_result
+    return _ocr_with_local_engine(path)
 
 
 def _ocr_pdf(path: Path) -> tuple[str, str, str | None]:
@@ -867,12 +903,8 @@ def _ocr_pdf(path: Path) -> tuple[str, str, str | None]:
         return "", "needs_ocr", "缺少 pymupdf，无法渲染扫描 PDF"
 
     try:
-        ocr = _get_ocr()
-    except ImportError:
-        return "", "needs_ocr", "OCR 引擎未安装，请安装 rapidocr-onnxruntime"
-
-    try:
         all_lines: list[str] = []
+        failed_reasons: list[str] = []
         with fitz.open(path) as doc:
             pages = list(doc)
             if not pages:
@@ -883,16 +915,20 @@ def _ocr_pdf(path: Path) -> tuple[str, str, str | None]:
                 tmp = path.with_name(f".ocr_tmp_{path.stem}_p{page_idx}.png")
                 pixmap.save(tmp)
                 try:
-                    result, _elapse = ocr(str(tmp))
-                    if result:
-                        all_lines.extend(item[1] for item in result)
-                    all_lines.append("")
+                    page_text, page_status, page_reason = _ocr_image(tmp)
+                    if page_status == "success" and page_text:
+                        all_lines.append(page_text)
+                        all_lines.append("")
+                    elif page_reason:
+                        failed_reasons.append(f"第 {page_idx} 页：{page_reason}")
                 finally:
                     tmp.unlink(missing_ok=True)
 
         text = "\n".join(all_lines).strip()
         if text:
             return text, "success", None
+        if failed_reasons:
+            return "", "failed", "；".join(failed_reasons)
         return "", "needs_ocr", "PDF 经 OCR 后未提取到有效文本"
     except Exception as exc:
         return "", "failed", f"PDF OCR 失败：{exc}"

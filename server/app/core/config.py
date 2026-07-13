@@ -16,8 +16,10 @@ class Settings(BaseSettings):
     ollama_api_key: str = "ollama"  # Ollama 不需要真实 key，但 OpenAI 客户端要求非空
     ai_timeout_seconds: int = 30
     ai_max_retries: int = 1
+    ocr_service_url: str | None = None
+    ocr_service_timeout_seconds: int = 120
+    ocr_local_fallback_enabled: bool = True
     income_reconciliation_storage_dir: str = "storage"
-    income_reconciliation_ai_enabled: bool = False
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

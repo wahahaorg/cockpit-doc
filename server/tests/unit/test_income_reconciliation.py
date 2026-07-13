@@ -52,6 +52,41 @@ def test_settlement_ai_prompt_recovers_ocr_table_and_validates_amount():
     assert "32038.95" not in prompt
 
 
+def test_remote_ocr_service_uploads_image_and_reads_text(tmp_path, monkeypatch):
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"png")
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"text": "客户公司\n合计\n32038.95", "lines": []}
+
+    def fake_post(url, *, files, timeout):
+        captured.update({"url": url, "file_name": files["file"][0], "timeout": timeout})
+        return FakeResponse()
+
+    settings = SimpleNamespace(
+        ocr_service_url="http://192.168.2.124:18000/ocr",
+        ocr_service_timeout_seconds=120,
+    )
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service.httpx, "post", fake_post)
+
+    text, status, reason = service._ocr_with_service(image_path)
+
+    assert status == "success"
+    assert reason is None
+    assert text == "客户公司\n合计\n32038.95"
+    assert captured == {
+        "url": "http://192.168.2.124:18000/ocr",
+        "file_name": "page.png",
+        "timeout": 120,
+    }
+
+
 def test_settlement_ai_uses_json_schema_and_keeps_raw_response(monkeypatch):
     captured = {}
 
@@ -76,7 +111,6 @@ def test_settlement_ai_uses_json_schema_and_keeps_raw_response(monkeypatch):
             return FakeStructuredModel()
 
     settings = SimpleNamespace(
-        income_reconciliation_ai_enabled=True,
         ai_model="qwen3:8b",
         ollama_base_url="http://ollama.test/v1",
         ai_timeout_seconds=30,
