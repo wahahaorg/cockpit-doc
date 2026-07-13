@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 from fastapi import UploadFile
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 JOB_ROOT = Path(get_settings().income_reconciliation_storage_dir) / "income-reconciliation" / "jobs"
 MONEY_TOLERANCE = Decimal("0.01")
+
+
+class SettlementAiRecord(BaseModel):
+    customerName: str | None = None
+    settlementPeriod: str | None = None
+    settlementAmount: float | None = None
+    confidence: float = Field(ge=0, le=1)
+    missingFields: list[str] = Field(default_factory=list)
+
+
+class SettlementAiResponse(BaseModel):
+    records: list[SettlementAiRecord] = Field(default_factory=list)
 
 
 def create_job(
@@ -245,11 +258,13 @@ def get_file_result(job_id: str, file_id: str) -> dict[str, Any]:
     item = next((file for file in files if file["fileId"] == file_id), None)
     if not item:
         raise AppError("file_not_found", "解析文件不存在", 404)
+    ai_extract = _read_json(job_dir / item.get("aiExtractPath", ""), None) if item.get("aiExtractPath") else None
     return {
         "fileId": file_id,
         "fileName": item["fileName"],
         "rawText": _read_text(job_dir / item.get("textPath", "")),
-        "aiExtractedJson": _read_json(job_dir / item.get("aiExtractPath", ""), None) if item.get("aiExtractPath") else None,
+        "aiRawResponse": ai_extract.get("rawResponse") if isinstance(ai_extract, dict) else None,
+        "aiExtractedJson": ai_extract,
         "standardJson": _standard_json_for_file(job_dir, file_id, item["fileType"]),
     }
 
@@ -486,6 +501,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
     settings = get_settings()
     prompt = _settlement_ai_prompt(text)
     tried_at = datetime.now().isoformat()
+    content: str | None = None
     try:
         from app.modules.ai.client import ai_available, get_chat_model
 
@@ -501,10 +517,26 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
                 len(text),
                 settings.ai_timeout_seconds,
             )
-            response = get_chat_model().invoke(prompt)
-            content = response.content if hasattr(response, "content") else str(response)
-            parsed = _json_from_text(content)
-            if isinstance(parsed, dict) and isinstance(parsed.get("records"), list):
+            structured_model = get_chat_model().with_structured_output(
+                SettlementAiResponse,
+                method="json_schema",
+                include_raw=True,
+            )
+            response = structured_model.invoke(prompt)
+            raw_message = response.get("raw") if isinstance(response, dict) else None
+            raw_content = getattr(raw_message, "content", None)
+            if isinstance(raw_content, str):
+                content = raw_content
+            elif raw_content is not None:
+                content = json.dumps(raw_content, ensure_ascii=False)
+            parsed_output = response.get("parsed") if isinstance(response, dict) else None
+            parsing_error = response.get("parsing_error") if isinstance(response, dict) else None
+            if isinstance(parsed_output, BaseModel):
+                parsed = parsed_output.model_dump(mode="json")
+            else:
+                parsed = parsed_output
+            if not parsing_error and isinstance(parsed, dict) and isinstance(parsed.get("records"), list):
+                parsed["rawResponse"] = content
                 parsed["model"] = settings.ai_model
                 parsed["status"] = "success"
                 parsed["triedAt"] = tried_at
@@ -513,7 +545,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
                     file_name,
                     settings.ai_model,
                     len(parsed["records"]),
-                    len(content),
+                    len(content or ""),
                     int((time.monotonic() - started_at) * 1000),
                 )
                 return parsed
@@ -521,9 +553,10 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
                 "income_reconciliation_ai_invalid_json file=%s model=%s response_chars=%d",
                 file_name,
                 settings.ai_model,
-                len(content),
+                len(content or ""),
             )
-            return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 返回内容不是有效的结算单 JSON", "triedAt": tried_at}
+            error = str(parsing_error) if parsing_error else "AI 返回内容不符合结算单结构"
+            return {"status": "failed", "records": [], "model": settings.ai_model, "error": error, "rawResponse": content, "triedAt": tried_at}
         else:
             logger.info(
                 "income_reconciliation_ai_skipped file=%s income_ai_enabled=%s ai_enabled=%s",
@@ -539,7 +572,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
             settings.ai_model,
             settings.ollama_base_url,
         )
-        return {"status": "failed", "records": [], "model": settings.ai_model, "error": str(exc), "triedAt": tried_at}
+        return {"status": "failed", "records": [], "model": settings.ai_model, "error": str(exc), "rawResponse": content, "triedAt": tried_at}
     return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 抽取失败", "triedAt": tried_at}
 
 
@@ -548,8 +581,8 @@ def _settlement_ai_prompt(text: str) -> str:
         "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
         "目标字段：customerName=需要向我方付款结算的客户方/甲方公司名称，用于匹配发票购买方和收支往来单位；settlementPeriod=结算周期 YYYY-MM；settlementAmount=本结算单最终应结算金额；confidence=0到1；missingFields=缺失字段数组。\n"
         "抽取规则：\n"
-        "1. 我方是技术服务方、服务提供方、收款方；结算单由我方发送给客户，要求客户付款结算。customerName 必须提取客户方、付款方、委托方或客户开票信息中的公司名称。\n"
-        "2. 不要把技术服务方、服务提供方、收款方或我方盖章主体作为 customerName。正文同时出现技术服务方和开票信息公司时，通常应选择开票信息中的客户公司。\n"
+        "1. 先从全文识别所有出现的完整公司或机构名称，包括称谓、正文、开票信息和盖章位置中的名称；不要仅根据甲方、乙方、技术服务方、付款方或收款方等角色称谓直接确定 customerName。\n"
+        "2. 从公司候选中排除名称里包含“杭州长生保”的我方公司，再从剩余候选中选择本结算单对应的客户公司作为 customerName。排除后没有可靠候选时填 null，不要使用文件名补全或编造公司名称。\n"
         "3. settlementAmount 表示本结算单最终应结算的总金额。OCR 文本可能存在换行错乱、列顺序丢失、标题与数值分离，请结合上下文恢复字段与数值的对应关系。\n"
         "4. 识别金额候选时，优先级依次为：明确标注的合计/总计/应结算金额，其次是可通过数量乘以单价验证的总价，再次是服务费用或含税总额，最后才是其他金额。\n"
         "5. 当存在调用次数、数量、单价、总价等字段时，请使用数量乘以单价对总价进行交叉验证；计算结果与某个金额候选一致时，应提高该候选的可信度。\n"

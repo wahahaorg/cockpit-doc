@@ -1,7 +1,9 @@
-from app.modules.income_reconciliation.company_name import CompanyMatchRelation, compare_company_names, parse_company_name
 import json
+from types import SimpleNamespace
 
+from app.modules.ai import client as ai_client
 from app.modules.income_reconciliation import service
+from app.modules.income_reconciliation.company_name import CompanyMatchRelation, compare_company_names, parse_company_name
 from app.modules.income_reconciliation.service import _reconcile, _settlement_ai_prompt
 
 
@@ -31,12 +33,13 @@ def test_company_name_does_not_fuzzily_merge_different_entities():
     assert compare_company_names("中驰浙江分", "中驰保险代理有限公司浙江分公司") == CompanyMatchRelation.DIFFERENT
 
 
-def test_settlement_ai_extracts_receiver_instead_of_payer():
-    prompt = _settlement_ai_prompt("付款方：甲公司\n收款方：乙公司")
+def test_settlement_ai_extracts_company_candidates_and_excludes_own_company():
+    prompt = _settlement_ai_prompt("技术服务方：我方公司\n开票信息公司名称：客户公司")
 
-    assert "customerName=收款方/服务提供方公司名称" in prompt
-    assert "不要把付款方、甲方、采购方" in prompt
-    assert "以收款方为准" in prompt
+    assert "customerName=需要向我方付款结算的客户方/甲方公司名称" in prompt
+    assert "先从全文识别所有出现的完整公司或机构名称" in prompt
+    assert "排除名称里包含“杭州长生保”的我方公司" in prompt
+    assert "不要使用文件名补全或编造公司名称" in prompt
 
 
 def test_settlement_ai_prompt_recovers_ocr_table_and_validates_amount():
@@ -47,6 +50,49 @@ def test_settlement_ai_prompt_recovers_ocr_table_and_validates_amount():
     assert "不要简单选择 OCR 文本中最后出现的数字" in prompt
     assert "不要输出分析过程" in prompt
     assert "32038.95" not in prompt
+
+
+def test_settlement_ai_uses_json_schema_and_keeps_raw_response(monkeypatch):
+    captured = {}
+
+    class FakeStructuredModel:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            parsed = service.SettlementAiResponse(records=[service.SettlementAiRecord(
+                customerName="甲有限公司",
+                settlementPeriod="2026-05",
+                settlementAmount=1000,
+                confidence=0.95,
+            )])
+            return {
+                "raw": SimpleNamespace(content='{"records":[{"customerName":"甲有限公司"}]}'),
+                "parsed": parsed,
+                "parsing_error": None,
+            }
+
+    class FakeChatModel:
+        def with_structured_output(self, schema, **kwargs):
+            captured.update({"schema": schema, **kwargs})
+            return FakeStructuredModel()
+
+    settings = SimpleNamespace(
+        income_reconciliation_ai_enabled=True,
+        ai_model="qwen3:8b",
+        ollama_base_url="http://ollama.test/v1",
+        ai_timeout_seconds=30,
+    )
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(ai_client, "ai_available", lambda: True)
+    monkeypatch.setattr(ai_client, "get_chat_model", lambda: FakeChatModel())
+
+    result = service._extract_settlement_with_ai("甲有限公司，合计 1000 元", "结算单.pdf")
+
+    assert captured["schema"] is service.SettlementAiResponse
+    assert captured["method"] == "json_schema"
+    assert captured["include_raw"] is True
+    assert result["status"] == "success"
+    assert result["records"][0]["settlementAmount"] == 1000
+    assert result["rawResponse"] == '{"records":[{"customerName":"甲有限公司"}]}'
 
 
 def test_reconcile_matches_amount_then_main_entity():
