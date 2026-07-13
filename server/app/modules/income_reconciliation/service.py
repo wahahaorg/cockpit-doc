@@ -546,10 +546,10 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
 def _settlement_ai_prompt(text: str) -> str:
     return (
         "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
-        "目标字段：customerName=收款方/服务提供方公司名称，settlementPeriod=结算周期 YYYY-MM，settlementAmount=本结算单最终应结算金额，confidence=0到1，missingFields=缺失字段数组。\n"
+        "目标字段：customerName=需要向我方付款结算的客户方/甲方公司名称，用于匹配发票购买方和收支往来单位；settlementPeriod=结算周期 YYYY-MM；settlementAmount=本结算单最终应结算金额；confidence=0到1；missingFields=缺失字段数组。\n"
         "抽取规则：\n"
-        "1. customerName 只提取本次结算的收款方、乙方或服务提供方公司名称。\n"
-        "2. 不要把付款方、甲方、采购方或付款方开票信息中的公司名称作为 customerName；如果正文同时出现付款方和收款方，以收款方为准。\n"
+        "1. 我方是技术服务方、服务提供方、收款方；结算单由我方发送给客户，要求客户付款结算。customerName 必须提取客户方、付款方、委托方或客户开票信息中的公司名称。\n"
+        "2. 不要把技术服务方、服务提供方、收款方或我方盖章主体作为 customerName。正文同时出现技术服务方和开票信息公司时，通常应选择开票信息中的客户公司。\n"
         "3. settlementAmount 表示本结算单最终应结算的总金额。OCR 文本可能存在换行错乱、列顺序丢失、标题与数值分离，请结合上下文恢复字段与数值的对应关系。\n"
         "4. 识别金额候选时，优先级依次为：明确标注的合计/总计/应结算金额，其次是可通过数量乘以单价验证的总价，再次是服务费用或含税总额，最后才是其他金额。\n"
         "5. 当存在调用次数、数量、单价、总价等字段时，请使用数量乘以单价对总价进行交叉验证；计算结果与某个金额候选一致时，应提高该候选的可信度。\n"
