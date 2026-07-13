@@ -26,6 +26,10 @@ export interface IncomeReconciliationFile {
   confidence?: number;
   errorReason?: string | null;
   parseReason?: string | null;
+  aiStatus?: 'success' | 'failed' | null;
+  aiError?: string | null;
+  aiRetryCount?: number;
+  aiLastTriedAt?: string | null;
 }
 export interface IncomeReconciliationSummary {
   confirmedRevenue: number;

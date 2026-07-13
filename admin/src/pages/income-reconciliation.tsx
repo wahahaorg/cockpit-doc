@@ -88,8 +88,11 @@ export default function IncomeReconciliation() {
   const [parseEvents, setParseEvents] = useState<IncomeReconciliationProgressEvent[]>([]);
   const [eventPolling, setEventPolling] = useState(false);
   const [restoringJob, setRestoringJob] = useState(false);
+  const [retryingFileId, setRetryingFileId] = useState<string>();
+  const [retryingAll, setRetryingAll] = useState(false);
 
   const files = job?.files || [];
+  const failedAiFiles = files.filter((file) => file.aiStatus === 'failed');
   const currentStatus = job?.status;
   const isPolling = currentStatus === 'generating';
   const summary = job?.summary;
@@ -254,6 +257,48 @@ export default function IncomeReconciliation() {
     }
   };
 
+  const refreshEvents = async (jobId: string) => {
+    const result = await api.incomeReconciliationEvents(jobId);
+    setParseEvents(result.value.data.events.slice(-80));
+    setMock(result.mock);
+  };
+
+  const retryFileAi = async (file: IncomeReconciliationFile) => {
+    if (!job?.jobId) return;
+    setRetryingFileId(file.fileId);
+    try {
+      const result = await api.retryIncomeReconciliationFileAi(job.jobId, file.fileId);
+      setJob(result.value.data);
+      setMock(result.mock);
+      await refreshEvents(job.jobId);
+      const retriedFile = result.value.data.files?.find((item) => item.fileId === file.fileId);
+      if (retriedFile?.aiStatus === 'failed') message.error(retriedFile.aiError || 'AI 重试失败');
+      else message.success('AI 重试成功，请重新生成核对表');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : 'AI 重试失败');
+    } finally {
+      setRetryingFileId(undefined);
+    }
+  };
+
+  const retryAllFailedAi = async () => {
+    if (!job?.jobId) return;
+    setRetryingAll(true);
+    try {
+      const result = await api.retryFailedIncomeReconciliationAi(job.jobId);
+      setJob(result.value.data);
+      setMock(result.mock);
+      await refreshEvents(job.jobId);
+      const remaining = result.value.data.files?.filter((file) => file.aiStatus === 'failed').length || 0;
+      if (remaining) message.warning(`批量重试完成，仍有 ${remaining} 个文件失败`);
+      else message.success('AI 失败文件已全部重试，请重新生成核对表');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '批量 AI 重试失败');
+    } finally {
+      setRetryingAll(false);
+    }
+  };
+
   return (
     <>
       <PageHeader title="收入核对" subtitle="上传开票、到账和结算单材料，生成技术服务收入链路核对表" mock={mock} />
@@ -364,17 +409,17 @@ export default function IncomeReconciliation() {
         className="audit-card file-list-card"
         title="文件解析列表"
         style={{ marginTop: 16 }}
-        extra={<Space wrap size={[8, 4]}><Tag>共 {fileSummary.total} 个文件</Tag><Tag color="green">成功 {fileSummary.success}</Tag><Tag color="processing">待/解析中 {fileSummary.parsing}</Tag><Tag color="orange">警告 {fileSummary.warning}</Tag><Tag color="red">失败 {fileSummary.failed}</Tag></Space>}
+        extra={<Space wrap size={[8, 4]}>{failedAiFiles.length > 0 && <Button size="small" icon={<ReloadOutlined />} loading={retryingAll} onClick={retryAllFailedAi}>重试全部 AI 失败项（{failedAiFiles.length}）</Button>}<Tag>共 {fileSummary.total} 个文件</Tag><Tag color="green">成功 {fileSummary.success}</Tag><Tag color="processing">待/解析中 {fileSummary.parsing}</Tag><Tag color="orange">警告 {fileSummary.warning}</Tag><Tag color="red">失败 {fileSummary.failed}</Tag></Space>}
       >
         <Table rowKey="fileId" dataSource={files} pagination={false} scroll={{ y: 320, x: 1040 }} tableLayout="fixed" columns={[
           { title: '文件名', dataIndex: 'fileName', width: 260, ellipsis: true, render: (value: string) => <Typography.Text title={value} ellipsis>{value}</Typography.Text> },
           { title: '类型', dataIndex: 'fileType', width: 150, ellipsis: true, render: (value: string) => fileTypeLabels[value] || value },
-          { title: '状态', dataIndex: 'parseStatus', width: 90, render: (value: string) => <Tag color={fileStatusMeta[value]?.color}>{fileStatusMeta[value]?.text || value}</Tag> },
+          { title: '状态', dataIndex: 'parseStatus', width: 110, render: (value: string, record) => record.aiStatus === 'failed' ? <Tag color="red">AI 失败</Tag> : <Tag color={fileStatusMeta[value]?.color}>{fileStatusMeta[value]?.text || value}</Tag> },
           { title: '行数', dataIndex: 'parsedRows', width: 80, render: (value) => value ?? '-' },
           { title: '有效行数', dataIndex: 'validRows', width: 100, render: (value) => value ?? '-' },
           { title: '置信度', dataIndex: 'confidence', width: 90, render: (value?: number) => value == null ? '-' : `${Math.round(value * 100)}%` },
           { title: '原因', width: 150, ellipsis: true, render: (_, record) => record.errorReason || record.parseReason || '-' },
-          { title: '操作', width: 120, render: (_, record) => <Button icon={<EyeOutlined />} onClick={() => openPreview(record)}>查看解析结果</Button> },
+          { title: '操作', width: 220, render: (_, record) => <Space><Button icon={<EyeOutlined />} onClick={() => openPreview(record)}>查看结果</Button>{record.aiStatus === 'failed' && <Button icon={<ReloadOutlined />} loading={retryingFileId === record.fileId} disabled={retryingAll} onClick={() => retryFileAi(record)}>重试 AI</Button>}</Space> },
         ]} />
       </Card>
       <Drawer width={720} title={preview?.fileName || '解析结果'} open={!!preview || previewLoading} loading={previewLoading} onClose={() => setPreview(undefined)}>

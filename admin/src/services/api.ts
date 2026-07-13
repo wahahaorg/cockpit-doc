@@ -19,6 +19,8 @@ export const api = {
   parseIncomeReconciliationJob: (jobId: string, background = false) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/parse${background ? '?background=true' : ''}`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: background ? 'parsing' : 'parsed' } })),
   generateIncomeReconciliationExcel: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/generate`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'generated' } })),
   incomeReconciliationFileResult: (jobId: string, fileId: string) => request<ObjectResult<IncomeReconciliationFileResult>>(`/income-reconciliation/jobs/${jobId}/files/${fileId}`, undefined, () => ({ data: mock.incomeFileResult(fileId) })),
+  retryIncomeReconciliationFileAi: (jobId: string, fileId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/files/${fileId}/retry-ai`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'parsed' } })),
+  retryFailedIncomeReconciliationAi: (jobId: string) => request<ObjectResult<IncomeReconciliationJob>>(`/income-reconciliation/jobs/${jobId}/retry-failed-ai`, { method: 'POST' }, () => ({ data: { ...mock.incomeJob, jobId, status: 'parsed' } })),
   incomeReconciliationEvents: (jobId: string) => request<ObjectResult<IncomeReconciliationProgressSnapshot>>(`/income-reconciliation/jobs/${jobId}/events.json`, undefined, () => ({ data: { job: { ...mock.incomeJob, jobId }, events: [] } })),
   incomeReconciliationDownloadUrl: (jobId: string) => apiUrl(`/income-reconciliation/jobs/${jobId}/download`),
 };
