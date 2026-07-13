@@ -79,6 +79,7 @@ export interface IncomeReconciliationFileResult {
   fileId: string;
   fileName: string;
   rawText?: string;
+  aiRawResponse?: string | null;
   aiExtractedJson?: unknown;
   standardJson?: unknown;
 }

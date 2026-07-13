@@ -257,21 +257,27 @@ export default function IncomeReconciliation() {
     }
   };
 
-  const refreshEvents = async (jobId: string) => {
-    const result = await api.incomeReconciliationEvents(jobId);
-    setParseEvents(result.value.data.events.slice(-80));
-    setMock(result.mock);
+  const refreshAfterAiRetry = async (jobId: string, fileId?: string) => {
+    const previewFileId = preview?.fileId;
+    const shouldRefreshPreview = !!previewFileId && (!fileId || previewFileId === fileId);
+    const [eventsResult, previewResult] = await Promise.all([
+      api.incomeReconciliationEvents(jobId),
+      shouldRefreshPreview ? api.incomeReconciliationFileResult(jobId, previewFileId) : Promise.resolve(undefined),
+    ]);
+    setJob(eventsResult.value.data.job);
+    setParseEvents(eventsResult.value.data.events.slice(-80));
+    setMock(eventsResult.mock || previewResult?.mock || false);
+    if (previewResult) setPreview(previewResult.value.data);
+    return eventsResult.value.data.job;
   };
 
   const retryFileAi = async (file: IncomeReconciliationFile) => {
     if (!job?.jobId) return;
     setRetryingFileId(file.fileId);
     try {
-      const result = await api.retryIncomeReconciliationFileAi(job.jobId, file.fileId);
-      setJob(result.value.data);
-      setMock(result.mock);
-      await refreshEvents(job.jobId);
-      const retriedFile = result.value.data.files?.find((item) => item.fileId === file.fileId);
+      await api.retryIncomeReconciliationFileAi(job.jobId, file.fileId);
+      const refreshedJob = await refreshAfterAiRetry(job.jobId, file.fileId);
+      const retriedFile = refreshedJob.files?.find((item) => item.fileId === file.fileId);
       if (retriedFile?.aiStatus === 'failed') message.error(retriedFile.aiError || 'AI 重试失败');
       else message.success('AI 重试成功，请重新生成核对表');
     } catch (error) {
@@ -285,11 +291,9 @@ export default function IncomeReconciliation() {
     if (!job?.jobId) return;
     setRetryingAll(true);
     try {
-      const result = await api.retryFailedIncomeReconciliationAi(job.jobId);
-      setJob(result.value.data);
-      setMock(result.mock);
-      await refreshEvents(job.jobId);
-      const remaining = result.value.data.files?.filter((file) => file.aiStatus === 'failed').length || 0;
+      await api.retryFailedIncomeReconciliationAi(job.jobId);
+      const refreshedJob = await refreshAfterAiRetry(job.jobId);
+      const remaining = refreshedJob.files?.filter((file) => file.aiStatus === 'failed').length || 0;
       if (remaining) message.warning(`批量重试完成，仍有 ${remaining} 个文件失败`);
       else message.success('AI 失败文件已全部重试，请重新生成核对表');
     } catch (error) {
@@ -414,7 +418,7 @@ export default function IncomeReconciliation() {
         <Table rowKey="fileId" dataSource={files} pagination={false} scroll={{ y: 320, x: 1040 }} tableLayout="fixed" columns={[
           { title: '文件名', dataIndex: 'fileName', width: 260, ellipsis: true, render: (value: string) => <Typography.Text title={value} ellipsis>{value}</Typography.Text> },
           { title: '类型', dataIndex: 'fileType', width: 150, ellipsis: true, render: (value: string) => fileTypeLabels[value] || value },
-          { title: '状态', dataIndex: 'parseStatus', width: 110, render: (value: string, record) => record.aiStatus === 'failed' ? <Tag color="red">AI 失败</Tag> : <Tag color={fileStatusMeta[value]?.color}>{fileStatusMeta[value]?.text || value}</Tag> },
+          { title: '状态', dataIndex: 'parseStatus', width: 180, render: (value: string, record) => <Space size={[4, 4]} wrap><Tag color={fileStatusMeta[value]?.color}>{fileStatusMeta[value]?.text || value}</Tag>{record.aiStatus && <Tag color={record.aiStatus === 'success' ? 'green' : 'red'}>AI {record.aiStatus === 'success' ? '成功' : '失败'}</Tag>}</Space> },
           { title: '行数', dataIndex: 'parsedRows', width: 80, render: (value) => value ?? '-' },
           { title: '有效行数', dataIndex: 'validRows', width: 100, render: (value) => value ?? '-' },
           { title: '置信度', dataIndex: 'confidence', width: 90, render: (value?: number) => value == null ? '-' : `${Math.round(value * 100)}%` },
@@ -425,6 +429,7 @@ export default function IncomeReconciliation() {
       <Drawer width={720} title={preview?.fileName || '解析结果'} open={!!preview || previewLoading} loading={previewLoading} onClose={() => setPreview(undefined)}>
         {preview && <Tabs items={[
           { key: 'raw', label: 'OCR/文本', children: <pre style={{ whiteSpace: 'pre-wrap' }}>{preview.rawText || '后端暂未返回 OCR/文本内容'}</pre> },
+          { key: 'ai-raw', label: 'AI 原始返回', children: <pre style={{ whiteSpace: 'pre-wrap' }}>{preview.aiRawResponse || '本次解析未保存 AI 原始返回；请重试 AI 后查看'}</pre> },
           { key: 'ai', label: 'AI 抽取 JSON', children: jsonBlock(preview.aiExtractedJson) },
           { key: 'standard', label: '标准 JSON', children: jsonBlock(preview.standardJson) },
         ]} />}
