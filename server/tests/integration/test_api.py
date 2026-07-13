@@ -151,5 +151,6 @@ def test_settlement_pdf_uses_ocr_when_text_layer_is_incomplete():
 
     text, status, reason = _extract_settlement_text(pdf_path)
     assert status == "success", reason
+    assert "# 第 1 页" in text
     assert "服务内容" in text
     assert "32038.95" in text

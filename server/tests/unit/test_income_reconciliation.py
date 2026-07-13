@@ -48,8 +48,20 @@ def test_settlement_ai_prompt_recovers_ocr_table_and_validates_amount():
     assert "换行错乱、列顺序丢失" in prompt
     assert "数量乘以单价对总价进行交叉验证" in prompt
     assert "不要简单选择 OCR 文本中最后出现的数字" in prompt
+    assert "不要把不同结算单的金额相加" in prompt
+    assert "sourcePages" in prompt
     assert "不要输出分析过程" in prompt
     assert "32038.95" not in prompt
+
+
+def test_standardized_settlement_records_keep_record_ids_and_source_pages():
+    records = service._standardize_settlement_records({"records": [
+        {"sourcePages": [1], "customerName": "甲有限公司", "settlementPeriod": "2026-05", "settlementAmount": 1000, "confidence": 0.95},
+        {"sourcePages": [2, 3], "customerName": "乙有限公司", "settlementPeriod": "2026-05", "settlementAmount": 2000, "confidence": 0.95},
+    ]}, "file_001", "两张结算单.pdf", "# 第 1 页\n甲\n# 第 2 页\n乙")
+
+    assert [record["recordId"] for record in records] == ["file_001_record_1", "file_001_record_2"]
+    assert [record["sourcePages"] for record in records] == [[1], [2, 3]]
 
 
 def test_remote_ocr_service_uploads_image_and_reads_text(tmp_path, monkeypatch):

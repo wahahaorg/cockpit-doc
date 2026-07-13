@@ -29,6 +29,7 @@ MONEY_TOLERANCE = Decimal("0.01")
 
 
 class SettlementAiRecord(BaseModel):
+    sourcePages: list[int] = Field(default_factory=list)
     customerName: str | None = None
     settlementPeriod: str | None = None
     settlementAmount: float | None = None
@@ -479,15 +480,18 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path, progress_base: in
 
 def _standardize_settlement_records(ai_result: dict[str, Any], file_id: str, file_name: str, text: str) -> list[dict[str, Any]]:
     records = []
-    for record in ai_result.get("records", []):
+    for record_index, record in enumerate(ai_result.get("records", []), start=1):
         confidence = float(record.get("confidence") or 0)
         missing = record.get("missingFields") or []
+        source_pages = sorted({int(page) for page in record.get("sourcePages", []) if str(page).isdigit() and int(page) > 0})
         parse_status = "success" if confidence >= 0.8 and not missing else "warning"
         parse_reason = None if parse_status == "success" else "AI 置信度低或关键字段缺失，需人工确认"
         records.append({
             "fileId": file_id,
+            "recordId": f"{file_id}_record_{record_index}",
             "sourceFile": file_name,
             "sourceType": Path(file_name).suffix.lower().lstrip(".") or "file",
+            "sourcePages": source_pages,
             "customerName": _text(record.get("customerName")) or None,
             "settlementPeriod": _month_text(record.get("settlementPeriod")),
             "settlementAmount": _float(_money(record.get("settlementAmount"))) if record.get("settlementAmount") not in (None, "") else None,
@@ -580,7 +584,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
 def _settlement_ai_prompt(text: str) -> str:
     return (
         "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
-        "目标字段：customerName=需要向我方付款结算的客户方/甲方公司名称，用于匹配发票购买方和收支往来单位；settlementPeriod=结算周期 YYYY-MM；settlementAmount=本结算单最终应结算金额；confidence=0到1；missingFields=缺失字段数组。\n"
+        "目标字段：sourcePages=本条结算单内容对应的 PDF 页码数组；customerName=需要向我方付款结算的客户方/甲方公司名称，用于匹配发票购买方和收支往来单位；settlementPeriod=结算周期 YYYY-MM；settlementAmount=本结算单最终应结算金额；confidence=0到1；missingFields=缺失字段数组。\n"
         "抽取规则：\n"
         "1. 先从全文识别所有出现的完整公司或机构名称，包括称谓、正文、开票信息和盖章位置中的名称；不要仅根据甲方、乙方、技术服务方、付款方或收款方等角色称谓直接确定 customerName。\n"
         "2. 从公司候选中排除名称里包含“杭州长生保”的我方公司，再从剩余候选中选择本结算单对应的客户公司作为 customerName。排除后没有可靠候选时填 null，不要使用文件名补全或编造公司名称。\n"
@@ -591,9 +595,9 @@ def _settlement_ai_prompt(text: str) -> str:
         "7. 如果存在多个金额候选，请在内部完成候选比较和算术核验后选择证据最充分的一项，不要简单选择 OCR 文本中最后出现的数字。\n"
         "8. settlementPeriod 只从正文明确的结算周期提取。\n"
         "9. 不要编造缺失信息；找不到的字段填 null。金额输出数字，不要带人民币、元、逗号或其他单位。\n"
-        "10. 如果一个文件里有多张独立结算单，records 输出多条；如果只是同一张结算单的多行服务项目，只输出一条。\n"
-        "只输出最终 JSON，不要输出分析过程。输出格式：{\"records\":[{\"customerName\":null,\"settlementPeriod\":null,\"settlementAmount\":null,\"confidence\":0.0,\"missingFields\":[]}]}\n"
-        f"文本：\n{text[:12000]}"
+        "10. 文本中的“# 第 N 页”是 PDF 页码边界。根据页码、重复标题、重复表头和独立合计判断结算单边界；一张结算单可以跨多页。每张独立结算单分别输出一条 records，并填写对应 sourcePages；不要把不同结算单的金额相加。如果只是同一张结算单的多行服务项目，只输出一条。\n"
+        "只输出最终 JSON，不要输出分析过程。输出格式：{\"records\":[{\"sourcePages\":[],\"customerName\":null,\"settlementPeriod\":null,\"settlementAmount\":null,\"confidence\":0.0,\"missingFields\":[]}]}\n"
+        f"文本：\n{text[:24000]}"
     )
 
 
@@ -679,6 +683,8 @@ def _result_item(
         "invoiceSourceRowNo": invoice.get("sourceRowNo") if invoice else None,
         "settlementFile": settlement.get("sourceFile") if settlement else None,
         "settlementFileId": settlement.get("fileId") if settlement else None,
+        "settlementRecordId": settlement.get("recordId") if settlement else None,
+        "settlementSourcePages": settlement.get("sourcePages") if settlement else None,
         "settlementPeriod": settlement.get("settlementPeriod") if settlement else None,
         "settlementAmount": settlement.get("settlementAmount") if settlement else None,
         "settlementConfidence": settlement.get("confidence") if settlement else None,
@@ -705,12 +711,12 @@ def _export_excel(path: Path, reconciliation: dict[str, Any], files: list[dict[s
         ws.append(row)
     _style_header(ws, 1)
 
-    headers = ["客户/项目", "发票号", "开票日期", "收入归属月份", "发票金额", "发票来源文件", "发票来源行号", "结算单文件", "结算周期", "结算金额", "结算单置信度", "到账日期", "到账金额", "到账来源文件", "到账来源行号", "系统判断状态", "异常原因", "异常来源环节", "倒查文件ID", "待人工确认事项"]
+    headers = ["客户/项目", "发票号", "开票日期", "收入归属月份", "发票金额", "发票来源文件", "发票来源行号", "结算单文件", "结算单记录ID", "结算单来源页码", "结算周期", "结算金额", "结算单置信度", "到账日期", "到账金额", "到账来源文件", "到账来源行号", "系统判断状态", "异常原因", "异常来源环节", "倒查文件ID", "待人工确认事项"]
     ws = wb.create_sheet("收入链路核对表")
     ws.append(headers)
     _style_header(ws, 1)
     for item in reconciliation["items"]:
-        ws.append([item.get("customerName"), item.get("invoiceNo"), item.get("invoiceDate"), item.get("revenueMonth"), item.get("invoiceAmount"), item.get("invoiceSourceFile"), item.get("invoiceSourceRowNo"), item.get("settlementFile"), item.get("settlementPeriod"), item.get("settlementAmount"), item.get("settlementConfidence"), item.get("cashflowDate"), item.get("receivedAmount"), item.get("cashflowSourceFile"), item.get("cashflowSourceRowNo"), item.get("status"), item.get("abnormalReason"), item.get("abnormalStage"), item.get("settlementFileId"), "是" if item.get("manualCheckRequired") else "否"])
+        ws.append([item.get("customerName"), item.get("invoiceNo"), item.get("invoiceDate"), item.get("revenueMonth"), item.get("invoiceAmount"), item.get("invoiceSourceFile"), item.get("invoiceSourceRowNo"), item.get("settlementFile"), item.get("settlementRecordId"), ",".join(map(str, item.get("settlementSourcePages") or [])), item.get("settlementPeriod"), item.get("settlementAmount"), item.get("settlementConfidence"), item.get("cashflowDate"), item.get("receivedAmount"), item.get("cashflowSourceFile"), item.get("cashflowSourceRowNo"), item.get("status"), item.get("abnormalReason"), item.get("abnormalStage"), item.get("settlementFileId"), "是" if item.get("manualCheckRequired") else "否"])
         _style_status_row(ws, ws.max_row, item.get("status"))
 
     ws = wb.create_sheet("异常项清单")
@@ -718,7 +724,7 @@ def _export_excel(path: Path, reconciliation: dict[str, Any], files: list[dict[s
     _style_header(ws, 1)
     for item in reconciliation["items"]:
         if item.get("manualCheckRequired") or item.get("status") == "发票已红冲":
-            ws.append([item.get("customerName"), item.get("invoiceNo"), item.get("invoiceDate"), item.get("revenueMonth"), item.get("invoiceAmount"), item.get("invoiceSourceFile"), item.get("invoiceSourceRowNo"), item.get("settlementFile"), item.get("settlementPeriod"), item.get("settlementAmount"), item.get("settlementConfidence"), item.get("cashflowDate"), item.get("receivedAmount"), item.get("cashflowSourceFile"), item.get("cashflowSourceRowNo"), item.get("status"), item.get("abnormalReason"), item.get("abnormalStage"), item.get("settlementFileId"), "是" if item.get("manualCheckRequired") else "否"])
+            ws.append([item.get("customerName"), item.get("invoiceNo"), item.get("invoiceDate"), item.get("revenueMonth"), item.get("invoiceAmount"), item.get("invoiceSourceFile"), item.get("invoiceSourceRowNo"), item.get("settlementFile"), item.get("settlementRecordId"), ",".join(map(str, item.get("settlementSourcePages") or [])), item.get("settlementPeriod"), item.get("settlementAmount"), item.get("settlementConfidence"), item.get("cashflowDate"), item.get("receivedAmount"), item.get("cashflowSourceFile"), item.get("cashflowSourceRowNo"), item.get("status"), item.get("abnormalReason"), item.get("abnormalStage"), item.get("settlementFileId"), "是" if item.get("manualCheckRequired") else "否"])
             _style_status_row(ws, ws.max_row, item.get("status"))
 
     ws = wb.create_sheet("解析文件列表")
@@ -788,7 +794,7 @@ def _extract_settlement_text(path: Path) -> tuple[str, str, str | None]:
             return text, "success", None
         ocr_text, ocr_status, ocr_reason = _ocr_pdf(path)
         if ocr_status == "success":
-            return _merge_text(text, ocr_text), "success", None
+            return ocr_text, "success", None
         if text.strip():
             return text, "success", None
         return ocr_text, ocr_status, ocr_reason
@@ -804,7 +810,10 @@ def _pdf_text(path: Path) -> str:
         import fitz
 
         with fitz.open(path) as doc:
-            return "\n".join(page.get_text() for page in doc)
+            return "\n\n".join(
+                f"# 第 {page_index} 页\n{page.get_text().strip()}"
+                for page_index, page in enumerate(doc, start=1)
+            )
     except Exception:
         return ""
 
@@ -816,19 +825,6 @@ def _pdf_text_has_settlement_detail(text: str) -> bool:
     has_amount = bool(re.search(r"\d+(?:,\d{3})*(?:\.\d{1,2})?", compact))
     has_settlement_terms = any(term in compact for term in ["合计", "金额", "服务内容", "结算周期", "技术服务费"])
     return has_amount and has_settlement_terms
-
-
-def _merge_text(*parts: str) -> str:
-    seen: set[str] = set()
-    lines: list[str] = []
-    for part in parts:
-        for line in (part or "").splitlines():
-            normalized = line.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            lines.append(normalized)
-    return "\n".join(lines)
 
 
 # ── OCR 服务及本地兜底 ────────────────────────────────────────────────────────
@@ -917,7 +913,7 @@ def _ocr_pdf(path: Path) -> tuple[str, str, str | None]:
                 try:
                     page_text, page_status, page_reason = _ocr_image(tmp)
                     if page_status == "success" and page_text:
-                        all_lines.append(page_text)
+                        all_lines.append(f"# 第 {page_idx} 页\n{page_text}")
                         all_lines.append("")
                     elif page_reason:
                         failed_reasons.append(f"第 {page_idx} 页：{page_reason}")
