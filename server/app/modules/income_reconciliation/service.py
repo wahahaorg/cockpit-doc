@@ -275,7 +275,7 @@ def retry_settlement_ai(job_id: str, file_id: str) -> dict[str, Any]:
 
     if ai_result.get("status") == "failed":
         reason = ai_result.get("error") or "AI 抽取失败"
-        item.update({"parseStatus": "warning", "parsedRows": 0, "validRows": 0, "confidence": 0, "errorReason": f"AI 抽取失败：{reason}", "aiStatus": "failed", "aiError": reason})
+        item.update({"parseStatus": "failed", "parsedRows": 0, "validRows": 0, "confidence": 0, "errorReason": f"AI 抽取失败：{reason}", "aiStatus": "failed", "aiError": reason})
         _write_json(job_dir / "parsed" / "files.json", files)
         _append_progress_event(job_dir, "ai_retry_failed", "AI 重试失败", file_id=file_id, file_name=item["fileName"], stage="ai_extract", reason=reason)
         return get_job(job_id)
@@ -431,7 +431,7 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path, progress_base: in
     _write_json(job_dir / ai_rel, ai_result)
     if ai_result.get("status") == "failed":
         reason = ai_result.get("error") or "AI 抽取失败"
-        status = _file_status(file_id, path.name, file_type, "warning", 0, 0, 0, f"AI 抽取失败：{reason}")
+        status = _file_status(file_id, path.name, file_type, "failed", 0, 0, 0, f"AI 抽取失败：{reason}")
         status.update({
             "textPath": text_rel,
             "aiExtractPath": ai_rel,
@@ -484,19 +484,7 @@ def _standardize_settlement_records(ai_result: dict[str, Any], file_id: str, fil
 
 def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
     settings = get_settings()
-    prompt = (
-        "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
-        "目标字段：customerName=付款方/客户名称，settlementPeriod=结算周期 YYYY-MM，settlementAmount=本结算单最终应结算金额，confidence=0到1，missingFields=缺失字段数组。\n"
-        "抽取规则：\n"
-        "1. customerName 从正文中的标题、付款方、客户名称或开票信息名称中提取。\n"
-        "2. settlementAmount 必须取整张结算单的最终合计/总计/应结算金额；表格中有服务内容、单价、数量、行合计时，不要把单价、数量或单行金额当作 settlementAmount。\n"
-        "3. 如果出现多行项目金额和最后一行“合计 32038.95”，应取最后合计金额 32038.95。\n"
-        "4. settlementPeriod 只从正文明确的结算周期提取。\n"
-        "5. 不要编造缺失信息；找不到的字段填 null。金额输出数字，不要带人民币、元、逗号或其他单位。\n"
-        "6. 如果一个文件里有多张独立结算单，records 输出多条；如果只是同一张结算单的多行服务项目，只输出一条。\n"
-        "输出格式：{\"records\":[{\"customerName\":null,\"settlementPeriod\":null,\"settlementAmount\":null,\"confidence\":0.0,\"missingFields\":[]}]}\n"
-        f"文本：\n{text[:12000]}"
-    )
+    prompt = _settlement_ai_prompt(text)
     tried_at = datetime.now().isoformat()
     try:
         from app.modules.ai.client import ai_available, get_chat_model
@@ -555,6 +543,26 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
     return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 抽取失败", "triedAt": tried_at}
 
 
+def _settlement_ai_prompt(text: str) -> str:
+    return (
+        "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
+        "目标字段：customerName=收款方/服务提供方公司名称，settlementPeriod=结算周期 YYYY-MM，settlementAmount=本结算单最终应结算金额，confidence=0到1，missingFields=缺失字段数组。\n"
+        "抽取规则：\n"
+        "1. customerName 只提取本次结算的收款方、乙方或服务提供方公司名称。\n"
+        "2. 不要把付款方、甲方、采购方或付款方开票信息中的公司名称作为 customerName；如果正文同时出现付款方和收款方，以收款方为准。\n"
+        "3. settlementAmount 表示本结算单最终应结算的总金额。OCR 文本可能存在换行错乱、列顺序丢失、标题与数值分离，请结合上下文恢复字段与数值的对应关系。\n"
+        "4. 识别金额候选时，优先级依次为：明确标注的合计/总计/应结算金额，其次是可通过数量乘以单价验证的总价，再次是服务费用或含税总额，最后才是其他金额。\n"
+        "5. 当存在调用次数、数量、单价、总价等字段时，请使用数量乘以单价对总价进行交叉验证；计算结果与某个金额候选一致时，应提高该候选的可信度。\n"
+        "6. 不要仅因为金额出现在项目行附近就排除它。如果该金额同时满足合计标签、总价字段或数量乘以单价的计算关系，应将其作为 settlementAmount。不要把调用次数、数量或单价本身当作结算金额。\n"
+        "7. 如果存在多个金额候选，请在内部完成候选比较和算术核验后选择证据最充分的一项，不要简单选择 OCR 文本中最后出现的数字。\n"
+        "8. settlementPeriod 只从正文明确的结算周期提取。\n"
+        "9. 不要编造缺失信息；找不到的字段填 null。金额输出数字，不要带人民币、元、逗号或其他单位。\n"
+        "10. 如果一个文件里有多张独立结算单，records 输出多条；如果只是同一张结算单的多行服务项目，只输出一条。\n"
+        "只输出最终 JSON，不要输出分析过程。输出格式：{\"records\":[{\"customerName\":null,\"settlementPeriod\":null,\"settlementAmount\":null,\"confidence\":0.0,\"missingFields\":[]}]}\n"
+        f"文本：\n{text[:12000]}"
+    )
+
+
 def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], settlements: list[dict[str, Any]]) -> dict[str, Any]:
     items = []
     used_cashflow: set[int] = set()
@@ -564,7 +572,7 @@ def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], 
         if not invoice.get("isEffective"):
             items.append(_result_item(invoice, None, None, "发票已红冲", invoice.get("invalidReason"), True))
             continue
-        cashflow_index, cashflow, cashflow_relation, cashflow_issue = _find_match(invoice, cashflows, "receivedAmount", used_cashflow)
+        cashflow_index, cashflow, cashflow_relation, cashflow_issue = _find_match(invoice, cashflows, "receivedAmount", used_cashflow, candidate_label="到账")
         if cashflow_index is not None:
             used_cashflow.add(cashflow_index)
         settlement_index, settlement, settlement_relation, settlement_issue = _find_match(
@@ -573,6 +581,7 @@ def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], 
             "settlementAmount",
             used_settlement,
             alternate_names=[cashflow.get("customerName")] if cashflow else None,
+            candidate_label="结算单",
         )
         if settlement_index is not None:
             used_settlement.add(settlement_index)
@@ -873,6 +882,7 @@ def _find_match(
     amount_key: str,
     used: set[int],
     alternate_names: list[Any] | None = None,
+    candidate_label: str = "",
 ) -> tuple[int | None, dict[str, Any] | None, str | None, str | None]:
     source_amount = Decimal(str(source.get("invoiceAmount") or 0))
     amount_candidates: list[tuple[int, dict[str, Any]]] = []
@@ -883,7 +893,7 @@ def _find_match(
         if abs(amount - source_amount) <= MONEY_TOLERANCE:
             amount_candidates.append((index, item))
     if not amount_candidates:
-        return None, None, None, "未找到同金额记录"
+        return None, None, None, f"未找到同金额{candidate_label}记录"
 
     source_names = [source.get("customerName"), *(alternate_names or [])]
     ranked: dict[CompanyMatchRelation, list[tuple[int, dict[str, Any]]]] = {
@@ -904,8 +914,8 @@ def _find_match(
             index, item = matches[0]
             return index, item, relation.value, None
         if len(matches) > 1:
-            return None, None, None, "同金额、同主体存在多个候选，需人工确认"
-    return None, None, None, "存在同金额记录，但公司主体不一致"
+            return None, None, None, f"同金额、同主体存在多个{candidate_label}候选，需人工确认"
+    return None, None, None, f"存在同金额{candidate_label}记录，但公司主体不一致"
 
 
 def _standard_json_for_file(job_dir: Path, file_id: str, file_type: str) -> Any:
