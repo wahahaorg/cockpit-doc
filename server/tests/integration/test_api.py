@@ -13,7 +13,7 @@ from app.database.session import get_db
 from app.main import app
 from app.modules.cashflow import models as cashflow_models  # noqa
 from app.modules.data_import import models as import_models  # noqa
-from app.modules.income_reconciliation.service import _extract_settlement_text, _heuristic_settlement_extract, _norm_name
+from app.modules.income_reconciliation.service import _extract_settlement_text
 from tests.unit.test_parser import workbook_bytes
 
 
@@ -150,11 +150,6 @@ def test_settlement_pdf_uses_ocr_when_text_layer_is_incomplete():
     pdf_path = PROJECT_ROOT / "test-data" / "紫金陈小说公司5月结算单（5.13）.pdf"
 
     text, status, reason = _extract_settlement_text(pdf_path)
-    result = _heuristic_settlement_extract(text, pdf_path.name)
-
     assert status == "success", reason
     assert "服务内容" in text
     assert "32038.95" in text
-    assert result["records"][0]["customerName"] == "紫金陈小说公司"
-    assert result["records"][0]["settlementAmount"] == 32038.95
-    assert _norm_name("紫金陈小说有限公司") == _norm_name("紫金陈小说公司")

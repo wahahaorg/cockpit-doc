@@ -17,6 +17,7 @@ from openpyxl.styles import Font, PatternFill
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError
+from app.modules.income_reconciliation.company_name import CompanyMatchRelation, compare_company_names, normalize_company_name
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,73 @@ def get_file_result(job_id: str, file_id: str) -> dict[str, Any]:
     }
 
 
+def retry_settlement_ai(job_id: str, file_id: str) -> dict[str, Any]:
+    job_dir = _require_job(job_id)
+    files = _read_json(job_dir / "parsed" / "files.json", [])
+    item = next((file for file in files if file.get("fileId") == file_id), None)
+    if not item:
+        raise AppError("file_not_found", "解析文件不存在", 404)
+    if not str(item.get("fileType", "")).startswith("settlement_"):
+        raise AppError("not_settlement_file", "只有结算单文件支持 AI 重试", 409)
+    text = _read_text(job_dir / item.get("textPath", ""))
+    if not text.strip():
+        raise AppError("ocr_text_not_found", "该结算单没有可用于重试的 OCR 文本", 409)
+
+    retry_count = int(item.get("aiRetryCount") or 0) + 1
+    _append_progress_event(job_dir, "ai_retry_started", "正在重新调用 AI 抽取结算单", file_id=file_id, file_name=item["fileName"], stage="ai_extract")
+    ai_result = _extract_settlement_with_ai(text, item["fileName"])
+    ai_rel = item.get("aiExtractPath") or f"extracted/ai_extracts/{file_id}.json"
+    _write_json(job_dir / ai_rel, ai_result)
+    item.update({"aiExtractPath": ai_rel, "aiRetryCount": retry_count, "aiLastTriedAt": ai_result.get("triedAt")})
+
+    if ai_result.get("status") == "failed":
+        reason = ai_result.get("error") or "AI 抽取失败"
+        item.update({"parseStatus": "warning", "parsedRows": 0, "validRows": 0, "confidence": 0, "errorReason": f"AI 抽取失败：{reason}", "aiStatus": "failed", "aiError": reason})
+        _write_json(job_dir / "parsed" / "files.json", files)
+        _append_progress_event(job_dir, "ai_retry_failed", "AI 重试失败", file_id=file_id, file_name=item["fileName"], stage="ai_extract", reason=reason)
+        return get_job(job_id)
+
+    records = _standardize_settlement_records(ai_result, file_id, item["fileName"], text)
+    parse_status = "success" if records and all(record["parseStatus"] == "success" for record in records) else "warning"
+    item.update({
+        "parseStatus": parse_status,
+        "parsedRows": len(records),
+        "validRows": sum(record["parseStatus"] == "success" for record in records),
+        "confidence": max((record["confidence"] for record in records), default=0),
+        "errorReason": None if parse_status == "success" else "存在低置信度或缺失字段",
+        "aiStatus": "success",
+        "aiError": None,
+    })
+    settlements = _read_json(job_dir / "parsed" / "settlements.json", [])
+    settlements = [record for record in settlements if record.get("fileId") != file_id]
+    settlements.extend(records)
+    _write_json(job_dir / "parsed" / "settlements.json", settlements)
+    _write_json(job_dir / "parsed" / "files.json", files)
+    _invalidate_generated_result(job_dir)
+    _append_progress_event(job_dir, "ai_retry_done", "AI 重试成功，结算单字段已更新", file_id=file_id, file_name=item["fileName"], stage="ai_extract", parsed_rows=len(records), valid_rows=item["validRows"], confidence=item["confidence"])
+    return get_job(job_id)
+
+
+def retry_failed_settlement_ai(job_id: str) -> dict[str, Any]:
+    job_dir = _require_job(job_id)
+    files = _read_json(job_dir / "parsed" / "files.json", [])
+    failed_ids = [item["fileId"] for item in files if item.get("aiStatus") == "failed"]
+    if not failed_ids:
+        raise AppError("no_failed_ai_files", "当前没有需要重试的 AI 失败文件", 409)
+    for file_id in failed_ids:
+        retry_settlement_ai(job_id, file_id)
+    return get_job(job_id)
+
+
+def _invalidate_generated_result(job_dir: Path) -> None:
+    metadata = _read_json(job_dir / "job.json", {})
+    if metadata.get("status") == "generated" or metadata.get("downloadUrl"):
+        for name in ("reconciliation.json", "reconciliation.xlsx"):
+            (job_dir / "result" / name).unlink(missing_ok=True)
+        metadata.update({"status": "parsed", "summary": None, "downloadUrl": None})
+        _write_json(job_dir / "job.json", metadata)
+
+
 def download_path(job_id: str) -> Path:
     path = _require_job(job_id) / "result" / "reconciliation.xlsx"
     if not path.exists():
@@ -361,42 +429,24 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path, progress_base: in
     ai_result = _extract_settlement_with_ai(text, path.name)
     ai_rel = f"extracted/ai_extracts/{file_id}.json"
     _write_json(job_dir / ai_rel, ai_result)
-    _append_progress_event(job_dir, "ai_done", "AI 抽取完成，正在标准化字段", file_id=file_id, file_name=path.name, stage="ai_extract", model=ai_result.get("model"), progress=progress_base + 10)
-    records = []
-    for record in ai_result.get("records", []):
-        confidence = float(record.get("confidence") or 0)
-        missing = record.get("missingFields") or []
-        parse_status = "success" if confidence >= 0.8 and not missing else "warning"
-        parse_reason = None if parse_status == "success" else "AI 置信度低或关键字段缺失，需人工确认"
-        records.append({
-            "fileId": file_id,
-            "sourceFile": path.name,
-            "sourceType": path.suffix.lower().lstrip(".") or "file",
-            "customerName": _text(record.get("customerName")) or None,
-            "settlementPeriod": _month_text(record.get("settlementPeriod")),
-            "settlementAmount": _float(_money(record.get("settlementAmount"))),
-            "confidence": confidence,
-            "parseStatus": parse_status,
-            "parseReason": parse_reason,
-            "rawText": text[:4000],
+    if ai_result.get("status") == "failed":
+        reason = ai_result.get("error") or "AI 抽取失败"
+        status = _file_status(file_id, path.name, file_type, "warning", 0, 0, 0, f"AI 抽取失败：{reason}")
+        status.update({
+            "textPath": text_rel,
+            "aiExtractPath": ai_rel,
+            "aiStatus": "failed",
+            "aiError": reason,
+            "aiRetryCount": 0,
+            "aiLastTriedAt": ai_result.get("triedAt"),
         })
-    if not records:
-        records = [{
-            "fileId": file_id,
-            "sourceFile": path.name,
-            "sourceType": path.suffix.lower().lstrip(".") or "file",
-            "customerName": None,
-            "settlementPeriod": None,
-            "settlementAmount": None,
-            "confidence": 0,
-            "parseStatus": "warning",
-            "parseReason": "AI 未抽取到结算单记录",
-            "rawText": text[:4000],
-        }]
-    parse_status = "success" if all(item["parseStatus"] == "success" for item in records) else "warning"
-    status = _file_status(file_id, path.name, file_type, parse_status, len(records), sum(r["parseStatus"] == "success" for r in records), max(r["confidence"] for r in records), None if parse_status == "success" else "存在低置信度或缺失字段")
-    status["textPath"] = text_rel
-    status["aiExtractPath"] = ai_rel
+        _append_progress_event(job_dir, "ai_failed", "AI 抽取失败，可在文件列表中重试", file_id=file_id, file_name=path.name, stage="ai_extract", reason=reason, progress=progress_base + 10)
+        return [], status
+    _append_progress_event(job_dir, "ai_done", "AI 抽取完成，正在标准化字段", file_id=file_id, file_name=path.name, stage="ai_extract", model=ai_result.get("model"), progress=progress_base + 10)
+    records = _standardize_settlement_records(ai_result, file_id, path.name, text)
+    parse_status = "success" if records and all(item["parseStatus"] == "success" for item in records) else "warning"
+    status = _file_status(file_id, path.name, file_type, parse_status, len(records), sum(r["parseStatus"] == "success" for r in records), max((r["confidence"] for r in records), default=0), None if parse_status == "success" else "存在低置信度或缺失字段")
+    status.update({"textPath": text_rel, "aiExtractPath": ai_rel, "aiStatus": "success", "aiError": None, "aiRetryCount": 0, "aiLastTriedAt": ai_result.get("triedAt")})
     _append_progress_event(job_dir, "stage_done", "结算单字段标准化完成", file_id=file_id, file_name=path.name, stage="standardize", parsed_rows=len(records), valid_rows=status["validRows"], confidence=status["confidence"], reason=status.get("errorReason"), progress=progress_base + 11)
     logger.info(
         "income_reconciliation_settlement_parse_finished file_id=%s file=%s status=%s model=%s records=%d elapsed_ms=%d",
@@ -410,23 +460,44 @@ def _parse_settlement(path: Path, file_id: str, job_dir: Path, progress_base: in
     return records, status
 
 
+def _standardize_settlement_records(ai_result: dict[str, Any], file_id: str, file_name: str, text: str) -> list[dict[str, Any]]:
+    records = []
+    for record in ai_result.get("records", []):
+        confidence = float(record.get("confidence") or 0)
+        missing = record.get("missingFields") or []
+        parse_status = "success" if confidence >= 0.8 and not missing else "warning"
+        parse_reason = None if parse_status == "success" else "AI 置信度低或关键字段缺失，需人工确认"
+        records.append({
+            "fileId": file_id,
+            "sourceFile": file_name,
+            "sourceType": Path(file_name).suffix.lower().lstrip(".") or "file",
+            "customerName": _text(record.get("customerName")) or None,
+            "settlementPeriod": _month_text(record.get("settlementPeriod")),
+            "settlementAmount": _float(_money(record.get("settlementAmount"))) if record.get("settlementAmount") not in (None, "") else None,
+            "confidence": confidence,
+            "parseStatus": parse_status,
+            "parseReason": parse_reason,
+            "rawText": text[:4000],
+        })
+    return records
+
+
 def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
     settings = get_settings()
-    filename_hint = _parse_filename_hint(file_name)
     prompt = (
         "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
-        "如果正文字段缺失，可以参考 filenameHint 作为兜底信息；正文优先，filenameHint 只用于缺失字段补全；如果冲突，以正文为准并降低 confidence。\n"
         "目标字段：customerName=付款方/客户名称，settlementPeriod=结算周期 YYYY-MM，settlementAmount=本结算单最终应结算金额，confidence=0到1，missingFields=缺失字段数组。\n"
         "抽取规则：\n"
-        "1. customerName 优先从标题、付款方、客户名称、开票信息名称中提取；正文缺失时才参考 filenameHint.customerName。\n"
+        "1. customerName 从正文中的标题、付款方、客户名称或开票信息名称中提取。\n"
         "2. settlementAmount 必须取整张结算单的最终合计/总计/应结算金额；表格中有服务内容、单价、数量、行合计时，不要把单价、数量或单行金额当作 settlementAmount。\n"
-        "3. 如果出现多行项目金额和最后一行“合计 32038.95”，应取最后合计金额 32038.95；正文缺失时才参考 filenameHint.settlementAmount。\n"
-        "4. settlementPeriod 优先从正文明确的结算周期提取；正文缺失时可参考 filenameHint.settlementPeriod。\n"
+        "3. 如果出现多行项目金额和最后一行“合计 32038.95”，应取最后合计金额 32038.95。\n"
+        "4. settlementPeriod 只从正文明确的结算周期提取。\n"
         "5. 不要编造缺失信息；找不到的字段填 null。金额输出数字，不要带人民币、元、逗号或其他单位。\n"
         "6. 如果一个文件里有多张独立结算单，records 输出多条；如果只是同一张结算单的多行服务项目，只输出一条。\n"
         "输出格式：{\"records\":[{\"customerName\":null,\"settlementPeriod\":null,\"settlementAmount\":null,\"confidence\":0.0,\"missingFields\":[]}]}\n"
-        f"文件名：{file_name}\nfilenameHint：{json.dumps(filename_hint, ensure_ascii=False)}\n文本：\n{text[:12000]}"
+        f"文本：\n{text[:12000]}"
     )
+    tried_at = datetime.now().isoformat()
     try:
         from app.modules.ai.client import ai_available, get_chat_model
 
@@ -447,6 +518,8 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
             parsed = _json_from_text(content)
             if isinstance(parsed, dict) and isinstance(parsed.get("records"), list):
                 parsed["model"] = settings.ai_model
+                parsed["status"] = "success"
+                parsed["triedAt"] = tried_at
                 logger.info(
                     "income_reconciliation_ai_call_finished file=%s model=%s records=%d response_chars=%d elapsed_ms=%d",
                     file_name,
@@ -462,6 +535,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
                 settings.ai_model,
                 len(content),
             )
+            return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 返回内容不是有效的结算单 JSON", "triedAt": tried_at}
         else:
             logger.info(
                 "income_reconciliation_ai_skipped file=%s income_ai_enabled=%s ai_enabled=%s",
@@ -469,6 +543,7 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
                 settings.income_reconciliation_ai_enabled,
                 ai_enabled,
             )
+            return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 服务未启用或当前不可用", "triedAt": tried_at}
     except Exception as exc:
         logger.exception(
             "income_reconciliation_ai_call_failed file=%s model=%s base_url=%s",
@@ -476,74 +551,8 @@ def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
             settings.ai_model,
             settings.ollama_base_url,
         )
-        fallback = _heuristic_settlement_extract(text, file_name)
-        fallback["model"] = "heuristic_fallback"
-        fallback["error"] = f"AI 调用失败，已使用规则兜底：{exc}"
-        return fallback
-    fallback = _heuristic_settlement_extract(text, file_name)
-    fallback["model"] = "heuristic_fallback"
-    return fallback
-
-
-def _heuristic_settlement_extract(text: str, file_name: str | None = None) -> dict[str, Any]:
-    file_stem = Path(file_name or "").stem
-    filename_hint = _parse_filename_hint(file_name or "")
-    customer = _match_first(text, [r"名称[:：]\s*([^\n\r]+?(?:有限公司|公司))", r"付款方[^\n\r]*?([^\n\r]+?(?:有限公司|公司))", r"^([^\n\r]+?(?:有限公司|公司))\d{0,2}月?结算单"])
-    if not customer and file_stem:
-        customer = _match_first(file_stem, [r"^(.+?(?:有限公司|公司))\d{0,2}月?结算单", r"^(.+?)\d{1,2}月结算单"])
-    if not customer:
-        customer = filename_hint.get("customerName")
-    period_raw = _match_first(text, [r"结算周期\s*[:：|]?\s*(20\d{2})\s*年?\s*(\d{1,2})\s*月", r"(20\d{2})年(\d{1,2})月"])
-    if isinstance(period_raw, tuple):
-        period = f"{period_raw[0]}-{int(period_raw[1]):02d}"
-    else:
-        period = _month_text(period_raw)
-    if not period:
-        period = filename_hint.get("settlementPeriod")
-    normalized_text = text.replace(",", "")
-    amount_raw = _match_first(normalized_text, [r"技术服务费金额\s*[:：|]?\s*([0-9]+(?:\.[0-9]+)?)", r"合计\s*(?:CNY|人民币|￥|¥)?\s*([0-9]+(?:\.[0-9]+)?)"])
-    amount = _float(_money(amount_raw)) if amount_raw else None
-    if amount is None:
-        amount = filename_hint.get("settlementAmount")
-    missing = [name for name, value in [("customerName", customer), ("settlementPeriod", period), ("settlementAmount", amount)] if value in (None, "")]
-    return {"records": [{"customerName": customer, "settlementPeriod": period, "settlementAmount": amount, "confidence": 0.78 if missing else 0.85, "missingFields": missing}]}
-
-
-def _parse_filename_hint(file_name: str, default_year: str = "2026") -> dict[str, Any]:
-    stem = Path(file_name or "").stem.strip()
-    if not stem:
-        return {}
-
-    patterns = [
-        r"(?P<month>\d{1,2})[.\\/-](?P<day>\d{1,2})[-_](?P<customer>[^-_]+)[-_](?P<amount>\d+(?:\.\d+)?)",
-        r"(?P<customer>.+?)(?P<month>\d{1,2})月结算单(?:[（(]\d{1,2}[.\\/-]\d{1,2}[）)])?(?:[-_](?P<amount>\d+(?:\.\d+)?))?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, stem)
-        if not match:
-            continue
-        groups = match.groupdict()
-        hint: dict[str, Any] = {}
-        customer = _clean_filename_customer(groups.get("customer"))
-        if customer:
-            hint["customerName"] = customer
-        month = groups.get("month")
-        if month:
-            hint["settlementPeriod"] = f"{default_year}-{int(month):02d}"
-        amount = groups.get("amount")
-        if amount:
-            hint["settlementAmount"] = _float(_money(amount))
-        return hint
-    return {}
-
-
-def _clean_filename_customer(value: str | None) -> str | None:
-    text = _text(value)
-    if not text:
-        return None
-    text = re.sub(r"^(?:20\d{2}[-_])?", "", text)
-    text = re.sub(r"(?:结算单|技术服务费|服务费|测试数据)$", "", text).strip("-_ ")
-    return text or None
+        return {"status": "failed", "records": [], "model": settings.ai_model, "error": str(exc), "triedAt": tried_at}
+    return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 抽取失败", "triedAt": tried_at}
 
 
 def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], settlements: list[dict[str, Any]]) -> dict[str, Any]:
@@ -555,12 +564,18 @@ def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], 
         if not invoice.get("isEffective"):
             items.append(_result_item(invoice, None, None, "发票已红冲", invoice.get("invalidReason"), True))
             continue
-        settlement_index, settlement = _find_match(invoice, settlements, "settlementAmount", used_settlement)
-        cashflow_index, cashflow = _find_match(invoice, cashflows, "receivedAmount", used_cashflow)
-        if settlement_index is not None:
-            used_settlement.add(settlement_index)
+        cashflow_index, cashflow, cashflow_relation, cashflow_issue = _find_match(invoice, cashflows, "receivedAmount", used_cashflow)
         if cashflow_index is not None:
             used_cashflow.add(cashflow_index)
+        settlement_index, settlement, settlement_relation, settlement_issue = _find_match(
+            invoice,
+            settlements,
+            "settlementAmount",
+            used_settlement,
+            alternate_names=[cashflow.get("customerName")] if cashflow else None,
+        )
+        if settlement_index is not None:
+            used_settlement.add(settlement_index)
         status = "已确认已到账"
         reason = None
         manual = False
@@ -572,10 +587,10 @@ def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], 
         if any(abs(amount - amounts[0]) > MONEY_TOLERANCE for amount in amounts[1:]):
             status, reason, manual = "金额异常", "结算单、发票、到账金额不一致", True
         elif not cashflow:
-            status, reason, manual = "已确认未到账", "有有效发票但未匹配到到账记录", True
+            status, reason, manual = "已确认未到账", cashflow_issue or "有有效发票但未匹配到到账记录", True
         elif not settlement:
-            status, reason, manual = "资料缺失待确认", "有有效发票但未匹配到结算单", True
-        items.append(_result_item(invoice, settlement, cashflow, status, reason, manual))
+            status, reason, manual = "资料缺失待确认", settlement_issue or "有有效发票但未匹配到结算单", True
+        items.append(_result_item(invoice, settlement, cashflow, status, reason, manual, cashflow_relation, settlement_relation))
 
     for index, cashflow in enumerate(cashflows):
         if index in used_cashflow:
@@ -601,7 +616,16 @@ def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], 
     return {"summary": summary, "items": items}
 
 
-def _result_item(invoice: dict[str, Any] | None, settlement: dict[str, Any] | None, cashflow: dict[str, Any] | None, status: str, reason: str | None, manual: bool) -> dict[str, Any]:
+def _result_item(
+    invoice: dict[str, Any] | None,
+    settlement: dict[str, Any] | None,
+    cashflow: dict[str, Any] | None,
+    status: str,
+    reason: str | None,
+    manual: bool,
+    cashflow_relation: str | None = None,
+    settlement_relation: str | None = None,
+) -> dict[str, Any]:
     return {
         "customerName": (invoice or settlement or cashflow or {}).get("customerName"),
         "invoiceNo": invoice.get("invoiceNo") if invoice else None,
@@ -623,6 +647,9 @@ def _result_item(invoice: dict[str, Any] | None, settlement: dict[str, Any] | No
         "abnormalReason": reason,
         "manualCheckRequired": manual,
         "abnormalStage": _abnormal_stage(status),
+        "cashflowCompanyMatch": cashflow_relation,
+        "settlementCompanyMatch": settlement_relation,
+        "matchRule": "amount_then_company_v1" if invoice else None,
     }
 
 
@@ -840,21 +867,45 @@ def _docx_text(path: Path) -> str:
         return ""
 
 
-def _find_match(source: dict[str, Any], candidates: list[dict[str, Any]], amount_key: str, used: set[int]) -> tuple[int | None, dict[str, Any] | None]:
-    source_name = _norm_name(source.get("customerName"))
+def _find_match(
+    source: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    amount_key: str,
+    used: set[int],
+    alternate_names: list[Any] | None = None,
+) -> tuple[int | None, dict[str, Any] | None, str | None, str | None]:
     source_amount = Decimal(str(source.get("invoiceAmount") or 0))
+    amount_candidates: list[tuple[int, dict[str, Any]]] = []
     for index, item in enumerate(candidates):
         if index in used:
             continue
-        if _norm_name(item.get("customerName")) != source_name:
-            continue
         amount = Decimal(str(item.get(amount_key) or 0))
         if abs(amount - source_amount) <= MONEY_TOLERANCE:
-            return index, item
-    for index, item in enumerate(candidates):
-        if index not in used and _norm_name(item.get("customerName")) == source_name:
-            return index, item
-    return None, None
+            amount_candidates.append((index, item))
+    if not amount_candidates:
+        return None, None, None, "未找到同金额记录"
+
+    source_names = [source.get("customerName"), *(alternate_names or [])]
+    ranked: dict[CompanyMatchRelation, list[tuple[int, dict[str, Any]]]] = {
+        CompanyMatchRelation.EXACT: [],
+        CompanyMatchRelation.SAME_MAIN_ENTITY: [],
+    }
+    for index, item in amount_candidates:
+        relations = [compare_company_names(name, item.get("customerName")) for name in source_names if name]
+        relation = CompanyMatchRelation.EXACT if CompanyMatchRelation.EXACT in relations else (
+            CompanyMatchRelation.SAME_MAIN_ENTITY if CompanyMatchRelation.SAME_MAIN_ENTITY in relations else None
+        )
+        if relation:
+            ranked[relation].append((index, item))
+
+    for relation in (CompanyMatchRelation.EXACT, CompanyMatchRelation.SAME_MAIN_ENTITY):
+        matches = ranked[relation]
+        if len(matches) == 1:
+            index, item = matches[0]
+            return index, item, relation.value, None
+        if len(matches) > 1:
+            return None, None, None, "同金额、同主体存在多个候选，需人工确认"
+    return None, None, None, "存在同金额记录，但公司主体不一致"
 
 
 def _standard_json_for_file(job_dir: Path, file_id: str, file_type: str) -> Any:
@@ -1050,16 +1101,7 @@ def _month_text(value: Any) -> str | None:
 
 
 def _norm_name(value: Any) -> str:
-    normalized = re.sub(r"[\s（）()【】\[\]、,，.。]", "", _text(value)).lower()
-    return normalized.replace("有限责任公司", "公司").replace("股份有限公司", "公司").replace("有限公司", "公司")
-
-
-def _match_first(text: str, patterns: list[str]) -> Any:
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.groups() if len(match.groups()) > 1 else match.group(1).strip()
-    return None
+    return normalize_company_name(value)
 
 
 def _json_from_text(text: str) -> Any:

@@ -55,6 +55,16 @@ def get_income_reconciliation_file_result(job_id: str, file_id: str):
     return {"data": service.get_file_result(job_id, file_id)}
 
 
+@router.post("/jobs/{job_id}/files/{file_id}/retry-ai")
+def retry_income_reconciliation_file_ai(job_id: str, file_id: str):
+    return {"data": service.retry_settlement_ai(job_id, file_id)}
+
+
+@router.post("/jobs/{job_id}/retry-failed-ai")
+def retry_failed_income_reconciliation_ai(job_id: str):
+    return {"data": service.retry_failed_settlement_ai(job_id)}
+
+
 @router.get("/jobs/{job_id}/download")
 def download_income_reconciliation_excel(job_id: str):
     path = service.download_path(job_id)
