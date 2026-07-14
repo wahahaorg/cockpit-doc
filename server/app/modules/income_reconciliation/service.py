@@ -1,44 +1,50 @@
 import json
 import logging
-import mimetypes
 import re
 import shutil
 import time
 import uuid
-import zipfile
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
 
-import httpx
 from fastapi import UploadFile
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.modules.income_reconciliation.company_name import CompanyMatchRelation, compare_company_names, normalize_company_name
+from app.modules.income_reconciliation.document_parser import (
+    _docx_text,
+    _extract_settlement_text,
+    _get_ocr,
+    _ocr_image,
+    _ocr_pdf,
+    _ocr_with_local_engine,
+    _ocr_with_service,
+    _pdf_text,
+    _pdf_text_has_settlement_detail,
+)
+from app.modules.income_reconciliation.settlement_ai import (
+    SettlementAiRecord,
+    SettlementAiResponse,
+    SettlementGroupingResponse,
+    SettlementPageGroup,
+    _extract_settlement_chunk_with_ai,
+    _extract_settlement_with_ai,
+    _group_settlement_pages_with_ai,
+    _settlement_ai_prompt,
+    _settlement_grouping_prompt,
+    _split_page_marked_text,
+    _validate_settlement_groups,
+)
 
 logger = logging.getLogger(__name__)
 
 JOB_ROOT = Path(get_settings().income_reconciliation_storage_dir) / "income-reconciliation" / "jobs"
 MONEY_TOLERANCE = Decimal("0.01")
-
-
-class SettlementAiRecord(BaseModel):
-    sourcePages: list[int] = Field(default_factory=list)
-    customerName: str | None = None
-    settlementPeriod: str | None = None
-    settlementAmount: float | None = None
-    confidence: float = Field(ge=0, le=1)
-    missingFields: list[str] = Field(default_factory=list)
-
-
-class SettlementAiResponse(BaseModel):
-    records: list[SettlementAiRecord] = Field(default_factory=list)
 
 
 def create_job(
@@ -492,7 +498,7 @@ def _standardize_settlement_records(ai_result: dict[str, Any], file_id: str, fil
             "sourceFile": file_name,
             "sourceType": Path(file_name).suffix.lower().lstrip(".") or "file",
             "sourcePages": source_pages,
-            "customerName": _text(record.get("customerName")) or None,
+            "customerName": _clean_ai_customer_name(record.get("customerName"), text),
             "settlementPeriod": _month_text(record.get("settlementPeriod")),
             "settlementAmount": _float(_money(record.get("settlementAmount"))) if record.get("settlementAmount") not in (None, "") else None,
             "confidence": confidence,
@@ -501,104 +507,6 @@ def _standardize_settlement_records(ai_result: dict[str, Any], file_id: str, fil
             "rawText": text[:4000],
         })
     return records
-
-
-def _extract_settlement_with_ai(text: str, file_name: str) -> dict[str, Any]:
-    settings = get_settings()
-    prompt = _settlement_ai_prompt(text)
-    tried_at = datetime.now().isoformat()
-    content: str | None = None
-    try:
-        from app.modules.ai.client import ai_available, get_chat_model
-
-        ai_enabled = ai_available()
-        if ai_enabled:
-            started_at = time.monotonic()
-            logger.info(
-                "income_reconciliation_ai_call_started file=%s model=%s base_url=%s prompt_chars=%d text_chars=%d timeout_seconds=%d",
-                file_name,
-                settings.ai_model,
-                settings.ollama_base_url,
-                len(prompt),
-                len(text),
-                settings.ai_timeout_seconds,
-            )
-            structured_model = get_chat_model().with_structured_output(
-                SettlementAiResponse,
-                method="json_schema",
-                include_raw=True,
-            )
-            response = structured_model.invoke(prompt)
-            raw_message = response.get("raw") if isinstance(response, dict) else None
-            raw_content = getattr(raw_message, "content", None)
-            if isinstance(raw_content, str):
-                content = raw_content
-            elif raw_content is not None:
-                content = json.dumps(raw_content, ensure_ascii=False)
-            parsed_output = response.get("parsed") if isinstance(response, dict) else None
-            parsing_error = response.get("parsing_error") if isinstance(response, dict) else None
-            if isinstance(parsed_output, BaseModel):
-                parsed = parsed_output.model_dump(mode="json")
-            else:
-                parsed = parsed_output
-            if not parsing_error and isinstance(parsed, dict) and isinstance(parsed.get("records"), list):
-                parsed["rawResponse"] = content
-                parsed["model"] = settings.ai_model
-                parsed["status"] = "success"
-                parsed["triedAt"] = tried_at
-                logger.info(
-                    "income_reconciliation_ai_call_finished file=%s model=%s records=%d response_chars=%d elapsed_ms=%d",
-                    file_name,
-                    settings.ai_model,
-                    len(parsed["records"]),
-                    len(content or ""),
-                    int((time.monotonic() - started_at) * 1000),
-                )
-                return parsed
-            logger.warning(
-                "income_reconciliation_ai_invalid_json file=%s model=%s response_chars=%d",
-                file_name,
-                settings.ai_model,
-                len(content or ""),
-            )
-            error = str(parsing_error) if parsing_error else "AI 返回内容不符合结算单结构"
-            return {"status": "failed", "records": [], "model": settings.ai_model, "error": error, "rawResponse": content, "triedAt": tried_at}
-        else:
-            logger.info(
-                "income_reconciliation_ai_skipped file=%s ai_enabled=%s",
-                file_name,
-                ai_enabled,
-            )
-            return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 服务未启用或当前不可用", "triedAt": tried_at}
-    except Exception as exc:
-        logger.exception(
-            "income_reconciliation_ai_call_failed file=%s model=%s base_url=%s",
-            file_name,
-            settings.ai_model,
-            settings.ollama_base_url,
-        )
-        return {"status": "failed", "records": [], "model": settings.ai_model, "error": str(exc), "rawResponse": content, "triedAt": tried_at}
-    return {"status": "failed", "records": [], "model": settings.ai_model, "error": "AI 抽取失败", "triedAt": tried_at}
-
-
-def _settlement_ai_prompt(text: str) -> str:
-    return (
-        "你是财务结算单解析助手。请从结算单 OCR/文本中抽取结构化字段，只输出 JSON，不要解释。\n"
-        "目标字段：sourcePages=本条结算单内容对应的 PDF 页码数组；customerName=需要向我方付款结算的客户方/甲方公司名称，用于匹配发票购买方和收支往来单位；settlementPeriod=结算周期 YYYY-MM；settlementAmount=本结算单最终应结算金额；confidence=0到1；missingFields=缺失字段数组。\n"
-        "抽取规则：\n"
-        "1. 先从全文识别所有出现的完整公司或机构名称，包括称谓、正文、开票信息和盖章位置中的名称；不要仅根据甲方、乙方、技术服务方、付款方或收款方等角色称谓直接确定 customerName。\n"
-        "2. 从公司候选中排除名称里包含“杭州长生保”的我方公司，再从剩余候选中选择本结算单对应的客户公司作为 customerName。排除后没有可靠候选时填 null，不要使用文件名补全或编造公司名称。\n"
-        "3. settlementAmount 表示本结算单最终应结算的总金额。OCR 文本可能存在换行错乱、列顺序丢失、标题与数值分离，请结合上下文恢复字段与数值的对应关系。\n"
-        "4. 识别金额候选时，优先级依次为：明确标注的合计/总计/应结算金额，其次是可通过数量乘以单价验证的总价，再次是服务费用或含税总额，最后才是其他金额。\n"
-        "5. 当存在调用次数、数量、单价、总价等字段时，请使用数量乘以单价对总价进行交叉验证；计算结果与某个金额候选一致时，应提高该候选的可信度。\n"
-        "6. 不要仅因为金额出现在项目行附近就排除它。如果该金额同时满足合计标签、总价字段或数量乘以单价的计算关系，应将其作为 settlementAmount。不要把调用次数、数量或单价本身当作结算金额。\n"
-        "7. 如果存在多个金额候选，请在内部完成候选比较和算术核验后选择证据最充分的一项，不要简单选择 OCR 文本中最后出现的数字。\n"
-        "8. settlementPeriod 只从正文明确的结算周期提取。\n"
-        "9. 不要编造缺失信息；找不到的字段填 null。金额输出数字，不要带人民币、元、逗号或其他单位。\n"
-        "10. 文本中的“# 第 N 页”是 PDF 页码边界。根据页码、重复标题、重复表头和独立合计判断结算单边界；一张结算单可以跨多页。每张独立结算单分别输出一条 records，并填写对应 sourcePages；不要把不同结算单的金额相加。如果只是同一张结算单的多行服务项目，只输出一条。\n"
-        "只输出最终 JSON，不要输出分析过程。输出格式：{\"records\":[{\"sourcePages\":[],\"customerName\":null,\"settlementPeriod\":null,\"settlementAmount\":null,\"confidence\":0.0,\"missingFields\":[]}]}\n"
-        f"文本：\n{text[:24000]}"
-    )
 
 
 def _reconcile(invoices: list[dict[str, Any]], cashflows: list[dict[str, Any]], settlements: list[dict[str, Any]]) -> dict[str, Any]:
@@ -771,174 +679,6 @@ def _find_header(ws, required: list[str]) -> tuple[int, dict[str, int]]:
 
 def _row_dict(ws, row_no: int, headers: dict[str, int]) -> dict[str, Any]:
     return {key: _cell_value(ws.cell(row_no, col).value) for key, col in headers.items()}
-
-
-def _extract_settlement_text(path: Path) -> tuple[str, str, str | None]:
-    suffix = path.suffix.lower()
-    if suffix in {".xlsx", ".xlsm"}:
-        wb = load_workbook(path, data_only=True)
-        lines = []
-        for ws in wb.worksheets:
-            lines.append(f"# {ws.title}")
-            for row in ws.iter_rows(values_only=True):
-                values = [_text(value) for value in row]
-                if any(values):
-                    lines.append(" | ".join(values))
-        return "\n".join(lines), "success", None
-    if suffix == ".docx":
-        text = _docx_text(path)
-        return (text, "success", None) if text.strip() else ("", "failed", "DOCX 未提取到有效文本")
-    if suffix == ".pdf":
-        text = _pdf_text(path)
-        if _pdf_text_has_settlement_detail(text):
-            return text, "success", None
-        ocr_text, ocr_status, ocr_reason = _ocr_pdf(path)
-        if ocr_status == "success":
-            return ocr_text, "success", None
-        if text.strip():
-            return text, "success", None
-        return ocr_text, ocr_status, ocr_reason
-    if suffix in {".txt", ".csv"}:
-        return path.read_text(encoding="utf-8", errors="ignore"), "success", None
-    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
-        return _ocr_image(path)
-    return "", "failed", "不支持的结算单文件类型"
-
-
-def _pdf_text(path: Path) -> str:
-    try:
-        import fitz
-
-        with fitz.open(path) as doc:
-            return "\n\n".join(
-                f"# 第 {page_index} 页\n{page.get_text().strip()}"
-                for page_index, page in enumerate(doc, start=1)
-            )
-    except Exception:
-        return ""
-
-
-def _pdf_text_has_settlement_detail(text: str) -> bool:
-    compact = re.sub(r"\s+", "", text or "")
-    if len(compact) < 80:
-        return False
-    has_amount = bool(re.search(r"\d+(?:,\d{3})*(?:\.\d{1,2})?", compact))
-    has_settlement_terms = any(term in compact for term in ["合计", "金额", "服务内容", "结算周期", "技术服务费"])
-    return has_amount and has_settlement_terms
-
-
-# ── OCR 服务及本地兜底 ────────────────────────────────────────────────────────
-
-_ocr_engine = None
-
-
-def _get_ocr():
-    global _ocr_engine
-    if _ocr_engine is None:
-        from rapidocr_onnxruntime import RapidOCR
-
-        _ocr_engine = RapidOCR()
-    return _ocr_engine
-
-
-def _ocr_with_service(path: Path) -> tuple[str, str, str | None]:
-    settings = get_settings()
-    if not settings.ocr_service_url:
-        return "", "failed", "未配置 OCR 服务地址"
-    try:
-        with path.open("rb") as file:
-            response = httpx.post(
-                settings.ocr_service_url,
-                files={"file": (path.name, file, mimetypes.guess_type(path.name)[0] or "application/octet-stream")},
-                timeout=settings.ocr_service_timeout_seconds,
-            )
-        response.raise_for_status()
-        payload = response.json()
-        text = payload.get("text") if isinstance(payload, dict) else None
-        if not text and isinstance(payload, dict) and isinstance(payload.get("lines"), list):
-            text = "\n".join(
-                str(item.get("text") or "").strip()
-                for item in payload["lines"]
-                if isinstance(item, dict) and item.get("text")
-            )
-        if isinstance(text, str) and text.strip():
-            return text.strip(), "success", None
-        return "", "needs_ocr", "PaddleOCR 服务未识别到有效文本"
-    except Exception as exc:
-        logger.warning("income_reconciliation_remote_ocr_failed file=%s url=%s error=%s", path.name, settings.ocr_service_url, exc)
-        return "", "failed", f"PaddleOCR 服务调用失败：{exc}"
-
-
-def _ocr_with_local_engine(path: Path) -> tuple[str, str, str | None]:
-    try:
-        result, _elapse = _get_ocr()(str(path))
-        if result is None:
-            return "", "needs_ocr", "OCR 未识别到有效文本"
-        return "\n".join(item[1] for item in result), "success", None
-    except ImportError:
-        return "", "needs_ocr", "OCR 引擎未安装，请安装 rapidocr-onnxruntime"
-    except Exception as exc:
-        return "", "failed", f"OCR 识别失败：{exc}"
-
-
-def _ocr_image(path: Path) -> tuple[str, str, str | None]:
-    """对单张图片执行 OCR，返回 (text, status, error_message)。"""
-    settings = get_settings()
-    if settings.ocr_service_url:
-        remote_result = _ocr_with_service(path)
-        if remote_result[1] == "success" or not settings.ocr_local_fallback_enabled:
-            return remote_result
-    return _ocr_with_local_engine(path)
-
-
-def _ocr_pdf(path: Path) -> tuple[str, str, str | None]:
-    """将 PDF 每页渲染为图片后执行 OCR，返回 (text, status, error_message)。"""
-    try:
-        import fitz
-    except ImportError:
-        return "", "needs_ocr", "缺少 pymupdf，无法渲染扫描 PDF"
-
-    try:
-        all_lines: list[str] = []
-        failed_reasons: list[str] = []
-        with fitz.open(path) as doc:
-            pages = list(doc)
-            if not pages:
-                return "", "failed", "PDF 文件没有可识别页面"
-
-            for page_idx, page in enumerate(pages, start=1):
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                tmp = path.with_name(f".ocr_tmp_{path.stem}_p{page_idx}.png")
-                pixmap.save(tmp)
-                try:
-                    page_text, page_status, page_reason = _ocr_image(tmp)
-                    if page_status == "success" and page_text:
-                        all_lines.append(f"# 第 {page_idx} 页\n{page_text}")
-                        all_lines.append("")
-                    elif page_reason:
-                        failed_reasons.append(f"第 {page_idx} 页：{page_reason}")
-                finally:
-                    tmp.unlink(missing_ok=True)
-
-        text = "\n".join(all_lines).strip()
-        if text:
-            return text, "success", None
-        if failed_reasons:
-            return "", "failed", "；".join(failed_reasons)
-        return "", "needs_ocr", "PDF 经 OCR 后未提取到有效文本"
-    except Exception as exc:
-        return "", "failed", f"PDF OCR 失败：{exc}"
-
-
-def _docx_text(path: Path) -> str:
-    try:
-        with zipfile.ZipFile(path) as zf:
-            xml = zf.read("word/document.xml")
-        root = ElementTree.fromstring(xml)
-        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-        return "\n".join(node.text for node in root.findall(".//w:t", ns) if node.text)
-    except Exception:
-        return ""
 
 
 def _find_match(
@@ -1126,6 +866,26 @@ def _text(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value).strip()
+
+
+def _clean_ai_customer_name(value: Any, source_text: str) -> str | None:
+    name = re.sub(r"\s+", "", _text(value))
+    if not name:
+        return None
+    legal_suffixes = ("有限责任公司", "股份有限公司", "有限公司", "集团公司", "分公司")
+    candidates = []
+    for raw_line in source_text.splitlines():
+        line = re.sub(r"\s+", "", raw_line).strip("：:，,。；;|#")
+        if not 4 <= len(line) <= 100:
+            continue
+        for suffix in legal_suffixes:
+            start = 0
+            while (position := line.find(suffix, start)) >= 0:
+                candidate = line[:position + len(suffix)]
+                if candidate in name:
+                    candidates.append(candidate)
+                start = position + len(suffix)
+    return max(candidates, key=len) if candidates else name
 
 
 def _money(value: Any) -> Decimal:

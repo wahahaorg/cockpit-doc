@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.modules.ai import client as ai_client
 from app.modules.income_reconciliation import service
+from app.modules.income_reconciliation import document_parser, settlement_ai
 from app.modules.income_reconciliation.company_name import CompanyMatchRelation, compare_company_names, parse_company_name
 from app.modules.income_reconciliation.service import _reconcile, _settlement_ai_prompt
 
@@ -47,11 +48,73 @@ def test_settlement_ai_prompt_recovers_ocr_table_and_validates_amount():
 
     assert "换行错乱、列顺序丢失" in prompt
     assert "数量乘以单价对总价进行交叉验证" in prompt
+    assert "调用次数或数量列的合计不是结算金额" in prompt
+    assert "不要简单选择合计标签后的第一个数字" in prompt
     assert "不要简单选择 OCR 文本中最后出现的数字" in prompt
     assert "不要把不同结算单的金额相加" in prompt
     assert "sourcePages" in prompt
     assert "不要输出分析过程" in prompt
     assert "32038.95" not in prompt
+
+
+def test_single_page_keeps_existing_multi_record_extraction(monkeypatch):
+    monkeypatch.setattr(settlement_ai, "_group_settlement_pages_with_ai", lambda *_: (_ for _ in ()).throw(AssertionError("单页不应调用分组节点")))
+    monkeypatch.setattr(settlement_ai, "_extract_settlement_chunk_with_ai", lambda *_args, **_kwargs: {
+        "status": "success",
+        "records": [{"settlementAmount": 100}, {"settlementAmount": 200}],
+    })
+
+    result = service._extract_settlement_with_ai("# 第 1 页\n同页包含两张结算单", "单页.pdf")
+
+    assert [record["settlementAmount"] for record in result["records"]] == [100, 200]
+
+
+def test_multi_page_groups_then_aggregates_existing_record_lists(monkeypatch):
+    calls = []
+    monkeypatch.setattr(settlement_ai, "_group_settlement_pages_with_ai", lambda *_: {
+        "status": "success",
+        "groups": [
+            {"groupId": 1, "sourcePages": [1], "expectedRecords": 2},
+            {"groupId": 2, "sourcePages": [2, 3], "expectedRecords": 1},
+        ],
+        "model": "test",
+        "rawResponse": "grouping raw",
+        "triedAt": "2026-07-14T10:00:00",
+    })
+
+    def fake_extract(text, file_name, expected_records=None):
+        calls.append((text, file_name, expected_records))
+        return {
+            "status": "success",
+            "records": [{"settlementAmount": index + 1} for index in range(expected_records)],
+            "model": "test",
+            "rawResponse": f"extract {expected_records}",
+            "triedAt": "2026-07-14T10:00:01",
+        }
+
+    monkeypatch.setattr(settlement_ai, "_extract_settlement_chunk_with_ai", fake_extract)
+    result = service._extract_settlement_with_ai(
+        "# 第 1 页\n第一页\n# 第 2 页\n第二页\n# 第 3 页\n第三页",
+        "多页.pdf",
+    )
+
+    assert [call[2] for call in calls] == [2, 1]
+    assert "# 第 1 页" in calls[0][0] and "# 第 2 页" not in calls[0][0]
+    assert "# 第 2 页" in calls[1][0] and "# 第 3 页" in calls[1][0]
+    assert len(result["records"]) == 3
+    assert [record["sourcePages"] for record in result["records"]] == [[1], [1], [2, 3]]
+
+
+def test_page_group_validation_rejects_duplicate_or_missing_pages():
+    try:
+        settlement_ai._validate_settlement_groups([
+            {"groupId": 1, "sourcePages": [1, 2], "expectedRecords": 1},
+            {"groupId": 2, "sourcePages": [2], "expectedRecords": 1},
+        ], [1, 2, 3])
+    except ValueError as exc:
+        assert "重复页码" in str(exc)
+    else:
+        raise AssertionError("重复和遗漏页码应校验失败")
 
 
 def test_standardized_settlement_records_keep_record_ids_and_source_pages():
@@ -62,6 +125,17 @@ def test_standardized_settlement_records_keep_record_ids_and_source_pages():
 
     assert [record["recordId"] for record in records] == ["file_001_record_1", "file_001_record_2"]
     assert [record["sourcePages"] for record in records] == [[1], [2, 3]]
+
+
+def test_standardized_settlement_removes_ocr_noise_before_complete_company_name():
+    records = service._standardize_settlement_records({"records": [{
+        "sourcePages": [1],
+        "customerName": "技发紫金保险销售有限公司上海分公司",
+        "settlementAmount": 354464.69,
+        "confidence": 0.95,
+    }]}, "file_001", "结算单.pdf", "技发\n紫金保险销售有限公司上海分公司费用清单（5月）05.15")
+
+    assert records[0]["customerName"] == "紫金保险销售有限公司上海分公司"
 
 
 def test_remote_ocr_service_uploads_image_and_reads_text(tmp_path, monkeypatch):
@@ -84,10 +158,10 @@ def test_remote_ocr_service_uploads_image_and_reads_text(tmp_path, monkeypatch):
         ocr_service_url="http://192.168.2.124:18000/ocr",
         ocr_service_timeout_seconds=120,
     )
-    monkeypatch.setattr(service, "get_settings", lambda: settings)
-    monkeypatch.setattr(service.httpx, "post", fake_post)
+    monkeypatch.setattr(document_parser, "get_settings", lambda: settings)
+    monkeypatch.setattr(document_parser.httpx, "post", fake_post)
 
-    text, status, reason = service._ocr_with_service(image_path)
+    text, status, reason = document_parser._ocr_with_service(image_path)
 
     assert status == "success"
     assert reason is None
@@ -127,7 +201,7 @@ def test_settlement_ai_uses_json_schema_and_keeps_raw_response(monkeypatch):
         ollama_base_url="http://ollama.test/v1",
         ai_timeout_seconds=30,
     )
-    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(settlement_ai, "get_settings", lambda: settings)
     monkeypatch.setattr(ai_client, "ai_available", lambda: True)
     monkeypatch.setattr(ai_client, "get_chat_model", lambda: FakeChatModel())
 
