@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     ai_max_retries: int = 1
     ocr_service_url: str | None = None
     ocr_service_timeout_seconds: int = 120
-    ocr_local_fallback_enabled: bool = True
+    ocr_local_fallback_enabled: bool = False
     income_reconciliation_storage_dir: str = "storage"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

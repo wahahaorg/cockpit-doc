@@ -197,7 +197,7 @@ from openpyxl import Workbook, load_workbook             # 读写 Excel
 from openpyxl.styles import Font, PatternFill            # Excel 样式
 # 下列模块在函数内部 import（惰性加载）：
 #   fitz (pymupdf)         → 读取 PDF
-#   rapidocr_onnxruntime   → OCR 文字识别
+#   rapidocr_onnxruntime   → 可选的本地 OCR 兜底（uv sync --extra local-ocr）
 
 # ── 📦 项目内部模块 ──
 from app.core.config import get_settings     # 获取项目配置（如存储目录）
@@ -332,7 +332,7 @@ def _parse_settlement(path, file_id, job_dir, progress_base=50):
 | `.docx` | 解压 ZIP → 读 word/document.xml → `w:t` 标签提取文本 | 🐍 `zipfile` + 🐍 `ElementTree` |
 | `.pdf` | 先 `fitz.get_text()` 提取；有结算关键词则返回；否则 OCR | 🌐 `fitz` (pymupdf) |
 | `.txt` / `.csv` | `Path.read_text()` 直接读 | 🐍 `pathlib` |
-| `.png` / `.jpg` 等 | 直接 OCR | 🌐 `rapidocr_onnxruntime` |
+| `.png` / `.jpg` 等 | 优先调用远程 PaddleOCR；按配置决定是否本地兜底 | 🌐 `httpx` / 可选 `rapidocr_onnxruntime` |
 
 #### `_docx_text()` — 📄 本文件
 - 🐍 `zipfile.ZipFile` → 🐍 `ElementTree.fromstring` → `findall(".//w:t", ns)`
@@ -359,8 +359,8 @@ def _get_ocr():            # 📄 本文件
 
 | 函数 | 说明 | 关键库 |
 |---|---|---|
-| `_ocr_image(path)` | 单张图片 OCR | 🌐 `rapidocr_onnxruntime` |
-| `_ocr_pdf(path)` | PDF 逐页渲染 → OCR | 🌐 `fitz` + 🌐 `rapidocr_onnxruntime` |
+| `_ocr_image(path)` | 单张图片 OCR | 🌐 `httpx` / 可选 `rapidocr_onnxruntime` |
+| `_ocr_pdf(path)` | PDF 逐页渲染 → OCR | 🌐 `fitz` + `_ocr_image()` |
 
 #### `_merge_text(*parts)` — 📄 本文件
 - 合并多个文本源，按行去重

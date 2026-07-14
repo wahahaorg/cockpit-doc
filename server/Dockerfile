@@ -16,10 +16,6 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
-
 # 从 builder 复制虚拟环境
 COPY --from=builder /app/.venv /app/.venv
 
