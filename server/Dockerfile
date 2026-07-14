@@ -1,7 +1,13 @@
 # ── 阶段 1：依赖安装 ──────────────────────────────────────────────────────────
 FROM python:3.12-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+ARG UV_VERSION=0.11.7
+RUN pip install --no-cache-dir \
+    --index-url https://mirrors.aliyun.com/pypi/simple/ \
+    "uv==${UV_VERSION}"
+
+ENV UV_HTTP_TIMEOUT=120 \
+    UV_HTTP_RETRIES=5
 
 WORKDIR /app
 
